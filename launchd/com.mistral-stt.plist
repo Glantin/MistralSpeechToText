@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent MistralSpeechToText : demarre la dictee au login, en tache de
+  fond, sans fenetre de terminal. L'outil reste actif en permanence ; il suffit
+  d'appuyer sur Option droite pour dicter.
+
+  On lance directement le python du venv (et non `uv run`) : c'est plus fiable
+  sous launchd (pas de resolution uv au login) ET ca rend le binaire responsable
+  des permissions macOS deterministe (cf. note Permissions plus bas).
+
+  IMPORTANT : adapte les chemins absolus ci-dessous a TON installation. Remplace
+  /Users/YOUR_NAME/path/to/mistral-speech-to-text par le dossier du projet sur ta
+  machine (lance `pwd` dedans pour l'obtenir).
+
+  Installation :
+    cp launchd/com.mistral-stt.plist ~/Library/LaunchAgents/com.mistral-stt.plist
+    launchctl load -w ~/Library/LaunchAgents/com.mistral-stt.plist
+  Recharger apres modif :
+    launchctl unload ~/Library/LaunchAgents/com.mistral-stt.plist
+    launchctl load -w ~/Library/LaunchAgents/com.mistral-stt.plist
+  Desinstallation :
+    launchctl unload -w ~/Library/LaunchAgents/com.mistral-stt.plist
+
+  PERMISSIONS macOS (IMPORTANT) :
+  Lance via launchd, le process responsable n'est plus ton terminal mais le
+  binaire python du venv :
+    /Users/YOUR_NAME/path/to/mistral-speech-to-text/.venv/bin/python
+  Il faut donc lui accorder UNE fois, dans Reglages Systeme > Confidentialite et
+  securite :
+    - Microphone            (prompt automatique au 1er enregistrement)
+    - Accessibilite         (pour le collage Cmd+V)
+    - Surveillance des entrees (Input Monitoring, pour capter Option droite ;
+      a ajouter a la main avec le bouton +, en naviguant vers le binaire python
+      ci-dessus : dans le selecteur de fichier, Cmd+Shift+G puis colle le chemin)
+  Consulte mistral_stt.log en cas de souci (ex: "Impossible de creer l'event tap"
+  = permissions pas encore accordees au binaire).
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.mistral-stt</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/YOUR_NAME/path/to/mistral-speech-to-text/.venv/bin/python</string>
+        <string>mistral_stt.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/YOUR_NAME/path/to/mistral-speech-to-text</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Interactive</string>
+
+    <key>StandardOutPath</key>
+    <string>/Users/YOUR_NAME/path/to/mistral-speech-to-text/mistral_stt.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/YOUR_NAME/path/to/mistral-speech-to-text/mistral_stt.log</string>
+</dict>
+</plist>

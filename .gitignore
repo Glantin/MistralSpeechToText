@@ -1,0 +1,12 @@
+# Secrets and personal data (never commit these)
+.env
+history.jsonl
+mistral_stt.log
+
+# Python / virtualenv
+.venv/
+__pycache__/
+*.pyc
+
+# Recordings
+*.wav
