@@ -182,12 +182,90 @@ mistral_stt.py`), which is more reliable under launchd than `uv run`. Logs go to
   is selected. The app prints the detected microphones on startup.
 - **`MISTRAL_API_KEY manquante`** → your `.env` file is missing or the key line
   is empty. Re-check step 3 of Install.
+- **Transcription fails with `CERTIFICATE_VERIFY_FAILED` / `self-signed
+  certificate in certificate chain`** → you are on a managed network behind a
+  TLS-inspecting proxy. See [Behind a corporate proxy](#behind-a-corporate-proxy-ssl-errors)
+  below.
+- **The dot does not appear (multi-monitor)** → the indicator now anchors itself
+  just above the Dock, on the screen that has the Dock. If you hid the Dock or
+  want a different spot, tweak `_MARGIN_BOTTOM` / `_SIZE` in `indicator.py`.
 
 When in doubt, run in debug mode for more detail:
 
 ```bash
 MISTRAL_STT_DEBUG=1 uv run python mistral_stt.py
 ```
+
+The log file `mistral_stt.log` (when running via the LaunchAgent) contains the
+same output. Tip: under launchd, Python output is buffered — add
+`PYTHONUNBUFFERED=1` to the agent's `EnvironmentVariables` to see logs live.
+
+### Behind a corporate proxy (SSL errors)
+
+On a work or managed Mac, transcription may fail with:
+
+```
+erreur transcription: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify
+failed: self-signed certificate in certificate chain
+```
+
+This means your company runs a **TLS-inspecting proxy** (Zscaler, Netskope, Cato
+Networks, a corporate firewall...) that re-signs HTTPS traffic with its own root
+certificate. Your browser and `curl` trust it because IT installed it in the
+macOS Keychain, but Python ships its own certificate list (`certifi`) which does
+not include it — so Python refuses the connection.
+
+The fix is to give Python a CA bundle that **also** contains your company's root
+certificate.
+
+1. **Identify the proxy's root certificate.** Inspect the chain the proxy
+   presents for the API:
+
+   ```bash
+   echo | openssl s_client -connect api.mistral.ai:443 -servername api.mistral.ai \
+     2>/dev/null | openssl x509 -noout -issuer
+   ```
+
+   The issuer name (e.g. `Cato-Networks-...`, `Zscaler Root CA`...) points to the
+   root CA your IT installed. Find its exact label in the System keychain:
+
+   ```bash
+   security find-certificate -a /Library/Keychains/System.keychain \
+     | grep -i "<your vendor>"
+   ```
+
+2. **Build a combined CA bundle** (certifi + your corporate root) inside the
+   project:
+
+   ```bash
+   mkdir -p certs
+   .venv/bin/python -c "import certifi, shutil; shutil.copy(certifi.where(), 'certs/corp-bundle.pem')"
+   security find-certificate -a -c "Cato Networks Root CA" -p /Library/Keychains/System.keychain \
+     >> certs/corp-bundle.pem
+   ```
+
+   Replace `"Cato Networks Root CA"` with the exact certificate name you found in
+   step 1. The `certs/` folder is git-ignored, so your bundle stays local.
+
+3. **Point Python at the bundle** with the `SSL_CERT_FILE` environment variable:
+
+   - Running from a terminal:
+
+     ```bash
+     SSL_CERT_FILE="$PWD/certs/corp-bundle.pem" uv run python mistral_stt.py
+     ```
+
+   - Running via the LaunchAgent: add it to the `EnvironmentVariables` block of
+     `~/Library/LaunchAgents/com.mistral-stt.plist`, then reload the agent
+     (`unload` then `load`):
+
+     ```xml
+     <key>EnvironmentVariables</key>
+     <dict>
+         <key>SSL_CERT_FILE</key>
+         <string>/Users/YOUR_NAME/path/to/MistralSpeechToText/certs/corp-bundle.pem</string>
+     </dict>
+     ```
 
 ## Test individual modules
 

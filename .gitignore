@@ -3,6 +3,9 @@
 history.jsonl
 mistral_stt.log
 
+# Local CA bundle for corporate TLS proxies (machine-specific, see README)
+certs/
+
 # Python / virtualenv
 .venv/
 __pycache__/

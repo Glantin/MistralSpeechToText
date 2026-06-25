@@ -28,29 +28,41 @@ from AppKit import (
     NSWindowStyleMaskBorderless,
     NSWindowStyleMaskNonactivatingPanel,
 )
+from Quartz import CGColorCreateGenericRGB
 
-_SIZE = 14.0          # diametre de la pastille en points
-_MARGIN_BOTTOM = 80.0  # distance au bas de l'ecran
+_SIZE = 16.0          # diametre de la pastille en points
+_MARGIN_BOTTOM = 8.0   # marge AU-DESSUS du Dock
 _FADE_SECONDS = 0.45   # duree de l'estompage a l'annulation
 
 
-def _color(r: float, g: float, b: float):
-    return NSColor.colorWithSRGBRed_green_blue_alpha_(r, g, b, 1.0)
+# CGColor cree directement via CoreGraphics. NB: passer par NSColor.CGColor()
+# echoue avec certaines versions de PyObjC (le pont renvoie un pointeur non
+# type), le calque reste transparent et la pastille est invisible.
+_RED = CGColorCreateGenericRGB(0.90, 0.16, 0.16, 1.0)    # enregistrement
+_AMBER = CGColorCreateGenericRGB(1.00, 0.65, 0.05, 1.0)  # transcription
 
 
-_RED = _color(0.90, 0.16, 0.16)    # enregistrement
-_AMBER = _color(1.00, 0.65, 0.05)  # transcription
+def _dock_visible_frame():
+    """visibleFrame de l'ecran qui porte le Dock (en bas de l'ecran).
+
+    NSScreen.mainScreen() suit le focus clavier : en multi-moniteur la pastille
+    finit sur le mauvais ecran. On cible donc explicitement l'ecran dont le Dock
+    occupe le bas (visibleFrame remonte par rapport au frame). A defaut, on
+    retombe sur l'ecran principal.
+    """
+    for s in NSScreen.screens():
+        f = s.frame()
+        vf = s.visibleFrame()
+        if vf.origin.y - f.origin.y > 1:   # Dock en bas -> zone visible remontee
+            return vf
+    return NSScreen.screens()[0].visibleFrame()
 
 
 class Indicator:
     """Pastille flottante pilotee depuis le main thread."""
 
     def __init__(self) -> None:
-        screen = NSScreen.mainScreen()
-        frame = screen.frame()
-        x = frame.origin.x + (frame.size.width - _SIZE) / 2.0
-        y = frame.origin.y + _MARGIN_BOTTOM
-        rect = NSMakeRect(x, y, _SIZE, _SIZE)
+        rect = self._target_rect()
 
         style = NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
         panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
@@ -80,10 +92,20 @@ class Indicator:
         self._view = view
         self._visible = False
 
-    def _set_color(self, color) -> None:
-        self._view.layer().setBackgroundColor_(color.CGColor())
+    def _target_rect(self):
+        """Position cible : bas-centre, juste au-dessus du Dock."""
+        vf = _dock_visible_frame()
+        x = vf.origin.x + (vf.size.width - _SIZE) / 2.0
+        y = vf.origin.y + _MARGIN_BOTTOM
+        return NSMakeRect(x, y, _SIZE, _SIZE)
+
+    def _set_color(self, cgcolor) -> None:
+        self._view.layer().setBackgroundColor_(cgcolor)
 
     def _show(self) -> None:
+        # On recalcule la position a chaque affichage : robuste si la config
+        # ecran a change (ecran branche/debranche, Dock deplace).
+        self._panel.setFrameOrigin_(self._target_rect().origin)
         self._panel.setAlphaValue_(1.0)
         if not self._visible:
             self._panel.orderFrontRegardless()
