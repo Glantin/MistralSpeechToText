@@ -6,10 +6,23 @@ mistral_stt.log
 # Local CA bundle for corporate TLS proxies (machine-specific, see README)
 certs/
 
+# macOS
+.DS_Store
+
 # Python / virtualenv
 .venv/
 __pycache__/
 *.pyc
+
+# py2app build artifacts
+build/
+dist/
+.eggs/
+*.egg-info/
+
+# Icone : on versionne le .icns final, pas les intermediaires regenerables
+assets/AppIcon.iconset/
+assets/AppIcon_master.png
 
 # Recordings
 *.wav

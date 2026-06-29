@@ -10,7 +10,11 @@ from dotenv import load_dotenv
 from mistralai.client import Mistral
 
 import config
+import credentials
 
+# En mode dev, charge un .env du dossier projet dans l'environnement ; la .app
+# n'en a pas, mais credentials.get_api_key() lira alors le fichier Application
+# Support. load_dotenv() est sans effet (et sans erreur) s'il n'y a pas de .env.
 load_dotenv()
 
 _client: Mistral | None = None
@@ -19,14 +23,36 @@ _client: Mistral | None = None
 def _get_client() -> Mistral:
     global _client
     if _client is None:
-        api_key = os.environ.get("MISTRAL_API_KEY")
+        api_key = credentials.get_api_key()
         if not api_key:
             raise RuntimeError(
-                "MISTRAL_API_KEY manquante. Copie .env.example en .env "
-                "et renseigne ta cle."
+                "MISTRAL_API_KEY manquante. Renseigne ta cle dans l'app "
+                "(menu > Saisir la cle API), ou via un .env en mode dev."
             )
         _client = Mistral(api_key=api_key)
     return _client
+
+
+def reset_client() -> None:
+    """Force la recreation du client (apres changement de cle dans l'app)."""
+    global _client
+    _client = None
+
+
+def test_api_key() -> tuple[bool, str]:
+    """Verifie la cle courante par un appel leger (liste des modeles).
+
+    Renvoie (ok, message). Cree un client jetable pour tester EXACTEMENT la cle
+    enregistree, sans toucher au client en cache.
+    """
+    key = credentials.get_api_key()
+    if not key:
+        return False, "Aucune clé renseignée."
+    try:
+        Mistral(api_key=key).models.list()
+        return True, "Clé valide ✅"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"Clé refusée : {str(exc)[:140]}"
 
 
 def transcribe(wav_path: str) -> str:

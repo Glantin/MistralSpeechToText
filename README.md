@@ -21,7 +21,49 @@ English mixed) and it still works.
 
 A small **floating dot** appears at the bottom center of your screen while in
 use: **red** = recording, **amber** = transcribing, **hidden** = idle. On
-cancel it flashes red and fades out.
+cancel it flashes red and fades out. It stays visible across all Spaces,
+including over full-screen apps.
+
+## Install the app (recommended, ~5 minutes)
+
+Download the prebuilt macOS app — no terminal, no Python, no `uv`.
+
+1. **Download** `MistralSTT.zip` from the
+   [Releases](https://github.com/Glantin/MistralSpeechToText/releases) page, then
+   double-click it to unzip.
+2. **Open** `MistralSTT.app`. The first time, macOS shows an "unidentified
+   developer" warning (the app isn't notarized yet): **right-click the app →
+   Open → Open**.
+3. The app **offers to move itself into Applications** — accept (recommended).
+   It then lives in the **menu bar** (🎙), not the Dock.
+4. A **setup window** opens. Do these three things:
+   - **API key** — paste your Mistral key (see
+     [Get a Mistral API key](#get-a-mistral-api-key-free)), click **Enregistrer**,
+     then **Tester la clé** to confirm.
+   - **Permissions** — click each **Autoriser** button (it opens the right
+     System Settings pane), turn the switch on, and come back: the line turns ✅.
+     The three are Microphone, Input Monitoring (to detect Right Option) and
+     Accessibility (to paste).
+   - **Launch at login** (optional) — tick the box to start it automatically.
+5. Hold **Right Option**, speak, release — the text appears at your cursor.
+
+From the menu-bar icon you can re-enter the API key, reopen the setup window, and
+toggle launch at login. If a transcription fails (bad key, network, corporate
+TLS proxy), a macOS **notification** tells you why.
+
+> If macOS refuses to open the app even via right-click → Open, clear the
+> download quarantine once: `xattr -dr com.apple.quarantine /Applications/MistralSTT.app`
+
+> **Why the app?** It bundles its own Python, so the macOS permissions stick to
+> the app itself. They no longer break when your system Python changes — which is
+> the main pain of the from-source setup below.
+
+---
+
+# Run from source (developer)
+
+The sections below are for running from source or hacking on the project. If you
+just want to use the tool, the app above is all you need.
 
 ## Requirements
 
@@ -95,6 +137,46 @@ quit.
 
 That is it. Put your cursor in any text field, hold Right Option, speak,
 release, and watch the text appear.
+
+## Build the app (.app)
+
+First, create a **stable signing identity** once (no Apple Developer account
+needed):
+
+```bash
+bash setup_signing.sh
+```
+
+This generates a self-signed code-signing certificate in a dedicated keychain.
+Without it the build falls back to an *ad-hoc* signature, whose fingerprint
+changes on every rebuild — which makes macOS **forget the permissions** you
+granted (Input Monitoring, Accessibility…) each time. With the stable identity,
+the app keeps the same identity across rebuilds and permissions persist.
+
+Then build the app:
+
+```bash
+bash build_app.sh
+```
+
+This syncs dependencies, runs PyInstaller (`MistralSTT.spec`), signs the bundle
+(with the stable identity if present), and writes `dist/MistralSTT.app` and
+`dist/MistralSTT.zip`. The app embeds its own Python, so the end user needs
+nothing installed. Inside the app, the API key is stored in
+`~/Library/Application Support/MistralSTT/.env` (entered via the onboarding
+window) instead of a project `.env`.
+
+> If permissions still won't stick after a rebuild, the macOS privacy database
+> may hold stale entries from older builds. Reset them with
+> `tccutil reset All com.glantin.mistral-stt` (the app must be installed in
+> `/Applications`), then grant again.
+
+Notes:
+
+- The build targets **your machine's architecture** (Intel or Apple Silicon).
+  For a single binary that runs on both, build with a `universal2` Python.
+- The app is **not notarized**. With an Apple Developer ID you can sign and
+  notarize it later (no code changes needed) to remove the first-launch warning.
 
 ## Transcription history
 
