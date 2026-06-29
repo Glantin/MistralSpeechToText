@@ -9,7 +9,18 @@ dependencies = [
     "mistralai>=1.0",
     "pyobjc-framework-Quartz>=10.0",
     "pyobjc-framework-Cocoa>=10.0",
+    "pyobjc-framework-ApplicationServices>=10.0",
+    "pyobjc-framework-ServiceManagement>=10.0",
     "python-dotenv>=1.0",
+]
+
+[dependency-groups]
+# Outils de packaging de la .app macOS (mode dev uniquement). PyInstaller est
+# choisi plutot que py2app car il supporte le Python "standalone" fourni par uv
+# (py2app exige un Python framework) et embarque proprement PortAudio
+# (sounddevice), pydantic et certifi via ses hooks.
+dev = [
+    "pyinstaller>=6.0",
 ]
 
 [tool.uv]

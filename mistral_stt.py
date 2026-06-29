@@ -67,10 +67,30 @@ _running = True
 # le LIRE pour piloter la pastille.
 _ui_state = "idle"
 
+# File des erreurs utilisateur (ex: cle invalide, reseau, proxy TLS). Le worker
+# y depose un message ; l'app (app.py) la draine sur le main thread pour afficher
+# une notification macOS. En mode CLI, l'erreur reste seulement imprimee.
+errors: "queue.Queue[str]" = queue.Queue()
+
 
 def _log(msg: str) -> None:
     if DEBUG:
         print(f"[mistral-stt:debug] {msg}")
+
+
+def _friendly_error(exc: Exception) -> str:
+    """Traduit une exception de transcription en message court et actionnable."""
+    msg = str(exc)
+    low = msg.lower()
+    if "manquante" in low or "api_key" in low or "api key" in low:
+        return "Clé API manquante ou invalide. Renseigne-la dans le menu 🎙."
+    if "401" in low or "unauthorized" in low or "invalid" in low and "key" in low:
+        return "Clé API refusée (401). Vérifie ta clé Mistral."
+    if "certificate" in low or "ssl" in low:
+        return "Erreur TLS (proxy d'entreprise ?). Voir la section proxy du README."
+    if "connection" in low or "timeout" in low or "network" in low or "resolve" in low:
+        return "Pas de réseau ou API injoignable. Réessaie."
+    return f"Échec de la transcription : {msg[:140]}"
 
 
 def _play(sound: str | None) -> None:
@@ -133,6 +153,7 @@ def _worker() -> None:
                     print("[mistral-stt] (transcription vide)")
             except Exception as exc:  # noqa: BLE001
                 print(f"[mistral-stt] erreur transcription: {exc}")
+                errors.put(_friendly_error(exc))
             finally:
                 _ui_state = "idle"
                 try:
@@ -207,6 +228,45 @@ def _sigint(signum, frame):  # noqa: ARG001
     _running = False
 
 
+# --- Coeur partage (reutilise par mistral_stt.py CLI ET par app.py) --------
+
+def start_worker() -> "threading.Thread":
+    """Demarre le thread worker (traitement start/stop/transcription)."""
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    return t
+
+
+def install_event_tap() -> bool:
+    """Cree l'event tap clavier et l'ajoute a la run loop COURANTE.
+
+    Doit etre appele depuis le main thread (celui qui pompera la run loop).
+    Renvoie True si le tap est en place, False si macOS l'a refuse (permission
+    "Surveillance des entrees" manquante). Idempotent : ne recree pas un tap
+    deja installe.
+    """
+    global _tap
+    if _tap is not None:
+        return True
+
+    mask = CGEventMaskBit(kCGEventFlagsChanged) | CGEventMaskBit(kCGEventKeyDown)
+    _tap = CGEventTapCreate(
+        kCGSessionEventTap,
+        kCGHeadInsertEventTap,
+        kCGEventTapOptionDefault,
+        mask,
+        _tap_callback,
+        None,
+    )
+    if _tap is None:
+        return False
+
+    source = CFMachPortCreateRunLoopSource(None, _tap, 0)
+    CFRunLoopAddSource(CFRunLoopGetCurrent(), source, kCFRunLoopCommonModes)
+    CGEventTapEnable(_tap, True)
+    return True
+
+
 def main() -> None:
     global _tap
 
@@ -240,18 +300,9 @@ def main() -> None:
             print(f"[mistral-stt] indicateur visuel desactive ({exc})")
             indicator = None
 
-    threading.Thread(target=_worker, daemon=True).start()
+    start_worker()
 
-    mask = CGEventMaskBit(kCGEventFlagsChanged) | CGEventMaskBit(kCGEventKeyDown)
-    _tap = CGEventTapCreate(
-        kCGSessionEventTap,
-        kCGHeadInsertEventTap,
-        kCGEventTapOptionDefault,
-        mask,
-        _tap_callback,
-        None,
-    )
-    if _tap is None:
+    if not install_event_tap():
         print(
             "[mistral-stt] Impossible de creer l'event tap.\n"
             "  -> Reglages Systeme > Confidentialite et securite >\n"
@@ -260,10 +311,6 @@ def main() -> None:
             "     puis relance."
         )
         raise SystemExit(1)
-
-    source = CFMachPortCreateRunLoopSource(None, _tap, 0)
-    CFRunLoopAddSource(CFRunLoopGetCurrent(), source, kCFRunLoopCommonModes)
-    CGEventTapEnable(_tap, True)
 
     # Boucle qui rend la main a Python a chaque tick : c'est ce qui permet au
     # Ctrl+C (SIGINT) d'etre traite (CFRunLoopRun() pur le bloquerait) ET ce qui

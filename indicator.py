@@ -17,10 +17,10 @@ from AppKit import (
     NSAnimationContext,
     NSBackingStoreBuffered,
     NSColor,
-    NSFloatingWindowLevel,
     NSMakeRect,
     NSPanel,
     NSScreen,
+    NSScreenSaverWindowLevel,
     NSView,
     NSWindowCollectionBehaviorCanJoinAllSpaces,
     NSWindowCollectionBehaviorFullScreenAuxiliary,
@@ -68,7 +68,10 @@ class Indicator:
         panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
             rect, style, NSBackingStoreBuffered, False
         )
-        panel.setLevel_(NSFloatingWindowLevel)
+        # Niveau tres eleve (et non NSFloatingWindowLevel) : indispensable pour
+        # passer AU-DESSUS du Space plein ecran d'une AUTRE application. Combine
+        # a CanJoinAllSpaces ci-dessous, la pastille reste visible partout.
+        panel.setLevel_(NSScreenSaverWindowLevel)
         panel.setOpaque_(False)
         panel.setBackgroundColor_(NSColor.clearColor())
         panel.setHasShadow_(False)
