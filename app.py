@@ -410,7 +410,7 @@ class AppDelegate(NSObject):
             NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
             return
 
-        w, h = 460, 440
+        w, h = 460, 500
         win = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(0, 0, w, h),
             NSWindowStyleMaskTitled | NSWindowStyleMaskClosable,
@@ -424,7 +424,10 @@ class AppDelegate(NSObject):
         # reference pendante ferait planter une reouverture via le menu.
         win.setReleasedWhenClosed_(False)
         win.setDelegate_(self)
-        win.center()
+        # Centre sur l'ecran ou se trouve le curseur (la ou l'utilisateur
+        # travaille), pas sur l'ecran principal : evite de s'ouvrir par-dessus
+        # une autre app sur un autre moniteur.
+        self._center_on_active_screen(win, w, h)
         content = win.contentView()
 
         def label(text, x, y, lw, lh, bold=False):
@@ -446,37 +449,48 @@ class AppDelegate(NSObject):
             content.addSubview_(b)
             return b
 
-        label("Bienvenue dans MistralSTT", 20, h - 40, w - 40, 22, bold=True)
+        label("Bienvenue dans MistralSTT", 20, h - 36, w - 40, 22, bold=True)
+
+        # Rappel des commandes : l'utilisateur ne les voit nulle part ailleurs.
+        label("Commandes :", 20, h - 62, w - 40, 18, bold=True)
         label(
-            "Maintiens Option droite (⌥) pour dicter. Configure ci-dessous :",
-            20, h - 64, w - 40, 18,
+            "• Maintiens ⌥ Option droite, parle, relâche : le texte s'insère.",
+            20, h - 82, w - 40, 18,
+        )
+        label(
+            "• ⌥ Option droite + Espace : écoute mains-libres (⌥ pour arrêter).",
+            20, h - 102, w - 40, 18,
+        )
+        label(
+            "• Échap : annule l'enregistrement en cours.",
+            20, h - 122, w - 40, 18,
         )
 
         # Cle API
-        label("1. Clé API Mistral", 20, h - 104, 200, 18)
+        label("1. Clé API Mistral", 20, h - 160, 200, 18)
         self._ob_key = NSSecureTextField.alloc().initWithFrame_(
-            NSMakeRect(20, h - 134, 300, 24)
+            NSMakeRect(20, h - 190, 300, 24)
         )
         self._ob_key.setStringValue_(credentials.get_api_key() or "")
         content.addSubview_(self._ob_key)
-        button("Enregistrer", 330, h - 136, 110, b"saveKeyFromOnboarding:")
-        button("Tester la clé", 20, h - 172, 140, b"testKey:")
-        self._ob_keytest = label("", 170, h - 168, 270, 18)
+        button("Enregistrer", 330, h - 192, 110, b"saveKeyFromOnboarding:")
+        button("Tester la clé", 20, h - 228, 140, b"testKey:")
+        self._ob_keytest = label("", 170, h - 224, 270, 18)
 
         # Permissions
-        label("2. Autorisations macOS (clique, coche, reviens ici)", 20, h - 212, w - 40, 18)
+        label("2. Autorisations macOS (clique, coche, reviens ici)", 20, h - 268, w - 40, 18)
 
-        self._ob_mic = label("• Micro : —", 20, h - 240, 230, 18)
-        button("Autoriser", 250, h - 242, 190, b"reqMic:")
+        self._ob_mic = label("• Micro : —", 20, h - 296, 230, 18)
+        button("Autoriser", 250, h - 298, 190, b"reqMic:")
 
-        self._ob_input = label("• Surveillance des entrées : —", 20, h - 272, 230, 18)
-        button("Autoriser", 250, h - 274, 190, b"reqInput:")
+        self._ob_input = label("• Surveillance des entrées : —", 20, h - 328, 230, 18)
+        button("Autoriser", 250, h - 330, 190, b"reqInput:")
 
-        self._ob_ax = label("• Accessibilité : —", 20, h - 304, 230, 18)
-        button("Autoriser", 250, h - 306, 190, b"reqAx:")
+        self._ob_ax = label("• Accessibilité : —", 20, h - 360, 230, 18)
+        button("Autoriser", 250, h - 362, 190, b"reqAx:")
 
         # Demarrage automatique (case a cocher).
-        label("3. Démarrage", 20, h - 340, 200, 18)
+        label("3. Démarrage", 20, h - 396, 200, 18)
         self._ob_login = NSButton.alloc().initWithFrame_(NSMakeRect(20, 54, 300, 22))
         self._ob_login.setButtonType_(NSButtonTypeSwitch)
         self._ob_login.setTitle_("Lancer à l'ouverture de session")
@@ -490,6 +504,31 @@ class AppDelegate(NSObject):
         self._update_onboarding_status()
         win.makeKeyAndOrderFront_(None)
         NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+
+    @objc.python_method
+    def _center_on_active_screen(self, win, w: int, h: int) -> None:
+        """Place la fenetre, centree, sur l'ecran qui contient le curseur.
+
+        `NSWindow.center()` vise l'ecran principal (celui de la barre de menus) ;
+        sur un setup multi-ecrans la fenetre s'ouvrait alors loin de l'utilisateur
+        (ex: par-dessus le navigateur d'un autre moniteur). On choisit plutot
+        l'ecran ou se trouve la souris, et on se rabat sur l'ecran principal."""
+        from AppKit import NSEvent, NSMakePoint, NSScreen
+
+        mouse = NSEvent.mouseLocation()
+        target = None
+        for scr in NSScreen.screens():
+            fr = scr.frame()
+            if (fr.origin.x <= mouse.x <= fr.origin.x + fr.size.width
+                    and fr.origin.y <= mouse.y <= fr.origin.y + fr.size.height):
+                target = scr
+                break
+        if target is None:
+            target = NSScreen.mainScreen()
+        vf = target.visibleFrame()
+        ox = vf.origin.x + (vf.size.width - w) / 2.0
+        oy = vf.origin.y + (vf.size.height - h) / 2.0
+        win.setFrameOrigin_(NSMakePoint(ox, oy))
 
     @objc.python_method
     def _update_onboarding_status(self) -> None:
