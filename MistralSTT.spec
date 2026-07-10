@@ -17,11 +17,17 @@ VERSION = "0.1.0"
 _icon = "assets/AppIcon.icns"
 ICON = _icon if os.path.exists(_icon) else None
 
+# Bundle CA d'entreprise embarque (repli si SSL_CERT_FILE absent) : transcribe.py
+# le cherche dans sys._MEIPASS/certs/. Ignore s'il n'existe pas.
+_DATAS = []
+if os.path.exists("certs/cato-bundle.pem"):
+    _DATAS.append(("certs/cato-bundle.pem", "certs"))
+
 a = Analysis(
     ["app.py"],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=_DATAS,
     # Modules locaux + paquets a imports dynamiques : forces par securite
     # (PyInstaller suit deja la plupart des imports statiques de app.py).
     hiddenimports=[
@@ -36,6 +42,11 @@ a = Analysis(
         "sounddevice",
         "numpy",
         "mistralai",
+        "httpx",
+        # truststore : valide le TLS via le trousseau macOS (proxy d'entreprise).
+        # Le sous-module _macos est charge dynamiquement -> a forcer.
+        "truststore",
+        "truststore._macos",
         "ServiceManagement",
     ],
     hookspath=[],

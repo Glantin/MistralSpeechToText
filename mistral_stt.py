@@ -45,7 +45,7 @@ import config
 import history
 from audio import Recorder, list_input_devices
 from inserter import insert_at_cursor
-from transcribe import transcribe
+from transcribe import classify_error, transcribe
 
 DEBUG = bool(os.environ.get("MISTRAL_STT_DEBUG"))
 
@@ -79,18 +79,12 @@ def _log(msg: str) -> None:
 
 
 def _friendly_error(exc: Exception) -> str:
-    """Traduit une exception de transcription en message court et actionnable."""
-    msg = str(exc)
-    low = msg.lower()
-    if "manquante" in low or "api_key" in low or "api key" in low:
-        return "Clé API manquante ou invalide. Renseigne-la dans le menu 🎙."
-    if "401" in low or "unauthorized" in low or "invalid" in low and "key" in low:
-        return "Clé API refusée (401). Vérifie ta clé Mistral."
-    if "certificate" in low or "ssl" in low:
-        return "Erreur TLS (proxy d'entreprise ?). Voir la section proxy du README."
-    if "connection" in low or "timeout" in low or "network" in low or "resolve" in low:
-        return "Pas de réseau ou API injoignable. Réessaie."
-    return f"Échec de la transcription : {msg[:140]}"
+    """Traduit une exception de transcription en message court et actionnable.
+
+    Delegue au classifieur partage (transcribe.classify_error) : le SSL/proxy y
+    est teste AVANT l'auth, donc un blocage proxy n'est plus etiquete "cle".
+    """
+    return classify_error(exc)[1]
 
 
 def _play(sound: str | None) -> None:
@@ -325,6 +319,8 @@ def main() -> None:
             if s != last_rendered:
                 indicator.render(s)
                 last_rendered = s
+            # Ré-affirme le premier plan (survit aux passages plein ecran).
+            indicator.tick()
 
     print("\n[mistral-stt] arret.")
     try:

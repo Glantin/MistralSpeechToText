@@ -211,6 +211,27 @@ class AppDelegate(NSObject):
             config.INDICATOR_TICK_SECONDS, self, b"tick:", None, True
         )
 
+        # Pre-vol : verifie la cle / la connexion au demarrage pour prevenir
+        # AVANT d'enregistrer 5 min pour rien (proxy TLS, cle refusee, reseau).
+        self._preflight_key_check()
+
+    @objc.python_method
+    def _preflight_key_check(self) -> None:
+        """Teste la cle en tache de fond ; notifie si elle echoue (proxy/cle/reseau).
+
+        Ne bloque pas le lancement. Silencieux si tout va bien ou si aucune cle
+        n'est encore renseignee (l'onboarding s'en charge alors)."""
+        if not credentials.has_api_key():
+            return
+
+        def _go() -> None:
+            ok, msg = transcribe.test_api_key()
+            if not ok:
+                # Draine par tick_ (main thread) en notification macOS.
+                core.errors.put(msg)
+
+        threading.Thread(target=_go, daemon=True).start()
+
     # --- Premier lancement : installation dans /Applications ---
     @objc.python_method
     def _maybe_offer_move_to_applications(self) -> bool:
@@ -361,6 +382,8 @@ class AppDelegate(NSObject):
             if s != self._last_rendered:
                 self._indicator.render(s)
                 self._last_rendered = s
+            # Ré-affirme le premier plan (survit aux passages plein ecran).
+            self._indicator.tick()
 
         # Erreurs du worker -> notification macOS.
         try:
@@ -389,6 +412,7 @@ class AppDelegate(NSObject):
         if value is not None and value.strip():
             credentials.set_api_key(value.strip())
             transcribe.reset_client()
+            self._preflight_key_check()
 
     def toggleLogin_(self, sender):  # noqa: N802, ARG002
         ok, msg = set_login_enabled(not login_enabled())
@@ -557,6 +581,7 @@ class AppDelegate(NSObject):
         if value and value.strip():
             credentials.set_api_key(value.strip())
             transcribe.reset_client()
+            self._preflight_key_check()
 
     def testKey_(self, sender):  # noqa: N802, ARG002
         # Enregistre d'abord ce qui est tape, puis teste en tache de fond (reseau).
