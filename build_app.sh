@@ -26,9 +26,17 @@ echo "==> Signature"
 # Sinon, repli ad-hoc (-) : fonctionne mais l'empreinte change a chaque build et
 # les autorisations sont a re-accorder.
 IDENTITY="MistralSTT Self-Signed"
+KEYCHAIN="$HOME/Library/Keychains/mistral-signing.keychain-db"
+KEYCHAIN_PASS="mistral-stt-local"   # meme valeur que setup_signing.sh
 if security find-identity -p codesigning 2>/dev/null | grep -q "$IDENTITY"; then
     SIGN_ID="$IDENTITY"
     echo "    identite stable : $IDENTITY"
+    # Le trousseau dedie se reverrouille au redemarrage de la machine. Verrouille,
+    # il laisse l'identite visible dans find-identity mais rend la cle privee
+    # inaccessible -> codesign echoue avec errSecInternalComponent.
+    if [ -f "$KEYCHAIN" ]; then
+        security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN"
+    fi
 else
     SIGN_ID="-"
     echo "    ATTENTION : identite stable absente -> signature ad-hoc."
