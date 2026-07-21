@@ -169,12 +169,18 @@ class Indicator:
     def tick(self) -> None:
         """A appeler a CHAQUE iteration de la boucle principale.
 
-        Tant que la pastille est visible, on la remet au premier plan : c'est ce
-        qui la fait reapparaitre apres qu'une app soit passee en plein ecran
-        (nouveau Space) et qu'elle ait ete enterree. Sans effet visible sinon.
-        Detecte aussi un changement de config ecran.
+        AU REPOS (pastille masquee, ~99 % du temps) : retour immediat. On EVITE
+        ainsi l'enumeration des ecrans (NSScreen.screens()) a chaque tick, qui
+        etait un cout CPU permanent inutile.
+
+        VISIBLE (enregistrement/transcription) : on remet la pastille au premier
+        plan (elle reapparait apres qu'une app soit passee en plein ecran) et on
+        detecte un changement de config ecran. Un changement d'ecran survenu
+        PENDANT le repos est de toute facon rattrape par render(), qui appelle
+        _ensure_panels() avant chaque affichage.
         """
+        if not self._visible:
+            return
         self._ensure_panels()
-        if self._visible:
-            for panel, _ in self._panels:
-                panel.orderFrontRegardless()
+        for panel, _ in self._panels:
+            panel.orderFrontRegardless()

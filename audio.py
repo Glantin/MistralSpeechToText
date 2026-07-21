@@ -21,16 +21,25 @@ class Recorder:
 
     def __init__(self):
         self._frames: list[np.ndarray] = []
+        self._nsamples = 0
+        self._max_samples = config.SAMPLE_RATE * config.MAX_RECORD_SECONDS
         self._stream: sd.InputStream | None = None
 
     def _callback(self, indata, frames, time_info, status):  # noqa: ARG002
         # Appele depuis le thread audio de PortAudio : on copie, on accumule.
         if status:
             print(f"[audio] status: {status}")
+        # Garde-fou memoire : au-dela de MAX_RECORD_SECONDS on cesse d'accumuler
+        # (le debut deja capte reste transcrit ; evite un buffer sans borne en
+        # ecoute continue oubliee).
+        if self._nsamples >= self._max_samples:
+            return
         self._frames.append(indata.copy())
+        self._nsamples += len(indata)
 
     def start(self) -> None:
         self._frames = []
+        self._nsamples = 0
         self._stream = sd.InputStream(
             samplerate=config.SAMPLE_RATE,
             channels=config.CHANNELS,

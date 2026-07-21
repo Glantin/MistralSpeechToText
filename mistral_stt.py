@@ -23,7 +23,9 @@ from Quartz import (
     CFMachPortCreateRunLoopSource,
     CFRunLoopAddSource,
     CFRunLoopGetCurrent,
+    CFRunLoopRun,
     CFRunLoopRunInMode,
+    CFRunLoopStop,
     CGEventGetFlags,
     CGEventGetIntegerValueField,
     CGEventMaskBit,
@@ -58,6 +60,7 @@ state = IDLE
 recorder = Recorder()
 _actions: "queue.Queue[str]" = queue.Queue()
 _tap = None
+_tap_thread = None
 _running = True
 
 # Etat de l'indicateur visuel, partage entre threads (lecture: main thread).
@@ -66,6 +69,25 @@ _running = True
 # a un seul ecrivain, donc pas de lock necessaire ; le main thread ne fait que
 # le LIRE pour piloter la pastille.
 _ui_state = "idle"
+
+# Hook optionnel invoque (depuis N'IMPORTE quel thread) a chaque changement de
+# _ui_state. app.py y branche un reveil du main thread (performSelectorOnMainThread)
+# pour que la pastille apparaisse IMMEDIATEMENT, sans attendre le prochain tick.
+# Ainsi la cadence repos du timer peut etre lente sans latence visible.
+on_ui_state_change = None
+
+
+def _set_ui_state(value: str) -> None:
+    """Affecte l'etat UI partage et notifie l'UI (si un hook est branche)."""
+    global _ui_state
+    _ui_state = value
+    cb = on_ui_state_change
+    if cb is not None:
+        try:
+            cb()
+        except Exception:  # noqa: BLE001
+            pass
+
 
 # File des erreurs utilisateur (ex: cle invalide, reseau, proxy TLS). Le worker
 # y depose un message ; l'app (app.py) la draine sur le main thread pour afficher
@@ -127,9 +149,9 @@ def _worker() -> None:
             _play(config.SOUND_DONE)
             if not wav_path:
                 print("[mistral-stt] (rien a transcrire)")
-                _ui_state = "idle"
+                _set_ui_state("idle")
                 continue
-            _ui_state = "transcribing"
+            _set_ui_state("transcribing")
             try:
                 text = transcribe(wav_path)
                 if text:
@@ -149,7 +171,7 @@ def _worker() -> None:
                 print(f"[mistral-stt] erreur transcription: {exc}")
                 errors.put(_friendly_error(exc))
             finally:
-                _ui_state = "idle"
+                _set_ui_state("idle")
                 try:
                     os.remove(wav_path)
                 except OSError:
@@ -178,9 +200,9 @@ def _tap_callback(proxy, type_, event, refcon):  # noqa: ARG001
             if is_down:
                 if state == IDLE:
                     state = RECORDING_PTT
-                    # Affectation triviale : le callback reste ultra rapide et la
-                    # pastille apparait des l'appui (latence minimale).
-                    _ui_state = "recording"
+                    # Reste ultra rapide : on note l'etat + on reveille l'UI
+                    # (la pastille apparait des l'appui, latence minimale).
+                    _set_ui_state("recording")
                     _actions.put("start")
                 elif state == RECORDING_CONTINUOUS:
                     state = IDLE
@@ -205,7 +227,7 @@ def _tap_callback(proxy, type_, event, refcon):  # noqa: ARG001
         if type_ == kCGEventKeyDown and keycode == config.ESCAPE_KEYCODE:
             if state in (RECORDING_PTT, RECORDING_CONTINUOUS):
                 state = IDLE
-                _ui_state = "cancelled"  # arme le flash de confirmation
+                _set_ui_state("cancelled")  # arme le flash de confirmation
                 _actions.put("cancel")
                 return None  # on avale l'Echap (uniquement pendant un enregistrement)
 
@@ -231,20 +253,19 @@ def start_worker() -> "threading.Thread":
     return t
 
 
-def install_event_tap() -> bool:
-    """Cree l'event tap clavier et l'ajoute a la run loop COURANTE.
+def _tap_thread_main(ready: "threading.Event", result: dict) -> None:
+    """Cree le tap et POMPE sa propre run loop, sur un thread DEDIE.
 
-    Doit etre appele depuis le main thread (celui qui pompera la run loop).
-    Renvoie True si le tap est en place, False si macOS l'a refuse (permission
-    "Surveillance des entrees" manquante). Idempotent : ne recree pas un tap
-    deja installe.
+    Le tap doit etre cree et sa source ajoutee sur le thread qui pompe la run
+    loop. On isole ainsi la livraison des frappes du thread principal AppKit :
+    meme si celui-ci est occupe (timer) ou bloque dans une fenetre modale
+    (NSAlert.runModal, onboarding), le callback clavier continue d'etre servi
+    ici -> plus de latence clavier a l'echelle du systeme.
     """
     global _tap
-    if _tap is not None:
-        return True
 
     mask = CGEventMaskBit(kCGEventFlagsChanged) | CGEventMaskBit(kCGEventKeyDown)
-    _tap = CGEventTapCreate(
+    tap = CGEventTapCreate(
         kCGSessionEventTap,
         kCGHeadInsertEventTap,
         kCGEventTapOptionDefault,
@@ -252,13 +273,49 @@ def install_event_tap() -> bool:
         _tap_callback,
         None,
     )
-    if _tap is None:
-        return False
+    if tap is None:
+        # Permission "Surveillance des entrees" manquante : on previent l'appelant
+        # et le thread se termine (il sera relance quand la permission arrivera).
+        result["ok"] = False
+        ready.set()
+        return
 
-    source = CFMachPortCreateRunLoopSource(None, _tap, 0)
+    source = CFMachPortCreateRunLoopSource(None, tap, 0)
     CFRunLoopAddSource(CFRunLoopGetCurrent(), source, kCFRunLoopCommonModes)
-    CGEventTapEnable(_tap, True)
-    return True
+    CGEventTapEnable(tap, True)
+    _tap = tap
+    result["ok"] = True
+    ready.set()
+    # Bloque ici pour la vie du process (thread daemon) : c'est cette run loop
+    # dediee qui sert le callback clavier.
+    CFRunLoopRun()
+
+
+def install_event_tap() -> bool:
+    """Demarre (si besoin) le thread dedie qui porte l'event tap clavier.
+
+    Renvoie True si le tap est en place, False si macOS l'a refuse (permission
+    "Surveillance des entrees" manquante). Idempotent : ne recree pas un tap
+    deja installe et ne relance pas un thread deja en cours d'initialisation.
+    Peut etre appele depuis n'importe quel thread (typiquement le main thread).
+    """
+    global _tap_thread
+    if _tap is not None:
+        return True
+    # Thread deja demarre mais tap pas encore pret : ne pas en lancer un 2e.
+    if _tap_thread is not None and _tap_thread.is_alive():
+        return _tap is not None
+
+    ready = threading.Event()
+    result: dict = {"ok": False}
+    _tap_thread = threading.Thread(
+        target=_tap_thread_main, args=(ready, result), daemon=True
+    )
+    _tap_thread.start()
+    # Attente bornee : la creation du tap est quasi instantanee ; le timeout
+    # evite tout blocage du main thread si quelque chose tourne mal.
+    ready.wait(timeout=2.0)
+    return bool(result.get("ok"))
 
 
 def main() -> None:
@@ -310,9 +367,26 @@ def main() -> None:
     # Ctrl+C (SIGINT) d'etre traite (CFRunLoopRun() pur le bloquerait) ET ce qui
     # pilote l'indicateur visuel (on lit l'etat partage et on rafraichit la
     # pastille uniquement quand il change).
-    tick = config.INDICATOR_TICK_SECONDS if indicator else 0.25
+    #
+    # Cadence adaptative : lente au repos (rien a faire), rapide quand la
+    # pastille est visible (reaffirmation premier plan). Un changement d'etat
+    # (thread du tap/worker) reveille cette boucle immediatement via
+    # CFRunLoopStop -> pas de latence d'apparition malgre la cadence repos.
+    if indicator is not None:
+        main_loop = CFRunLoopGetCurrent()
+
+        global on_ui_state_change
+        on_ui_state_change = lambda: CFRunLoopStop(main_loop)  # noqa: E731
+
     last_rendered = None
     while _running:
+        if indicator is None:
+            tick = 0.25
+        elif _ui_state in ("recording", "transcribing"):
+            tick = config.INDICATOR_TICK_SECONDS
+        else:
+            # Repos (y compris "cancelled" apres le flash) : cadence lente.
+            tick = config.INDICATOR_TICK_IDLE_SECONDS
         CFRunLoopRunInMode(kCFRunLoopDefaultMode, tick, False)
         if indicator is not None:
             s = _ui_state

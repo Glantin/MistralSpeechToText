@@ -33,6 +33,10 @@ ESCAPE_KEYCODE = 53
 # --- Audio ----------------------------------------------------------------
 SAMPLE_RATE = 16000  # 16 kHz, suffisant et leger pour la STT
 CHANNELS = 1
+# Duree max d'une prise (garde-fou memoire pour l'ecoute continue mains-libres :
+# sinon le buffer croit sans borne). Au-dela, on cesse d'accumuler ; le debut
+# est conserve et transcrit normalement. 10 min ~ 19 Mo en 16 kHz mono int16.
+MAX_RECORD_SECONDS = 600
 
 # --- Transcription --------------------------------------------------------
 MISTRAL_MODEL = "voxtral-mini-latest"
@@ -48,9 +52,17 @@ SOUND_DONE = "/System/Library/Sounds/Pop.aiff"
 # Petite pastille flottante (NSPanel) en bas-centre de l'ecran :
 #   rouge = enregistrement, ambre = transcription en cours, masquee = repos.
 INDICATOR_ENABLED = True
-# Periode de la boucle main-thread qui pilote l'UI ET rend la main au Ctrl+C.
-# Plus bas = pastille plus reactive, un peu plus de reveils CPU.
-INDICATOR_TICK_SECONDS = 0.1
+# Deux cadences pour la boucle main-thread qui pilote l'UI (et rend la main au
+# Ctrl+C en CLI) :
+#   - RAPIDE quand la pastille est VISIBLE (enregistrement/transcription) : elle
+#     est reaffirmee au premier plan souvent, donc reste au-dessus meme si une
+#     app passe en plein ecran ;
+#   - REPOS (idle) : bien plus lent, car il n'y a alors quasiment rien a faire.
+#     On evite ainsi 10 reveils/s inutiles a vie (cout CPU permanent, sensible
+#     sur Mac Intel). L'apparition de la pastille reste immediate : le coeur
+#     reveille le main thread au changement d'etat (core.on_ui_state_change).
+INDICATOR_TICK_SECONDS = 0.1        # cadence rapide (pastille visible)
+INDICATOR_TICK_IDLE_SECONDS = 0.75  # cadence repos
 
 # --- Presse-papier --------------------------------------------------------
 # Filet de securite : si True (defaut), la derniere transcription RESTE dans le

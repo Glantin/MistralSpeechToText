@@ -203,13 +203,14 @@ class AppDelegate(NSObject):
         if not credentials.has_api_key() or not self._all_permissions_ok():
             self.showOnboarding_(None)
 
-        # Timer unique : rafraichit la pastille, (re)arme le tap des que la
-        # permission est accordee, et met a jour le menu/onboarding.
-        from AppKit import NSTimer
-
-        self._timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            config.INDICATOR_TICK_SECONDS, self, b"tick:", None, True
-        )
+        # Timer a cadence ADAPTATIVE : lente au repos, rapide quand la pastille
+        # est visible (voir tick_). Demarre en cadence repos. Le coeur reveille
+        # le main thread au changement d'etat (hook ci-dessous) pour que la
+        # pastille apparaisse immediatement malgre la cadence repos.
+        self._timer = None
+        self._tick_interval = None
+        self._schedule_timer(config.INDICATOR_TICK_IDLE_SECONDS)
+        core.on_ui_state_change = self._wake_main
 
         # Pre-vol : verifie la cle / la connexion au demarrage pour prevenir
         # AVANT d'enregistrer 5 min pour rien (proxy TLS, cle refusee, reseau).
@@ -347,7 +348,16 @@ class AppDelegate(NSObject):
         menu.addItem_(NSMenuItem.separatorItem())
         menu.addItem_(self._mk_item("Quitter", b"quitApp:"))
 
+        # Delegue : l'etat du menu (permissions, login) n'est recalcule QUE quand
+        # l'utilisateur ouvre le menu (menuNeedsUpdate:), plus a chaque tick.
+        # Cela sort les appels systeme couteux (AXIsProcessTrusted,
+        # CGPreflightListenEventAccess, SMAppService.status) du chemin 10 Hz.
+        menu.setDelegate_(self)
         self._status_item.setMenu_(menu)
+        self._refresh_menu()
+
+    # NSMenuDelegate : recalcule l'etat juste avant l'affichage du menu.
+    def menuNeedsUpdate_(self, menu):  # noqa: N802, ARG002
         self._refresh_menu()
 
     @objc.python_method
@@ -371,8 +381,35 @@ class AppDelegate(NSObject):
         )
 
     # --- Timer principal ---
+    @objc.python_method
+    def _schedule_timer(self, interval: float) -> None:
+        """(Re)programme le timer principal a `interval` secondes."""
+        from AppKit import NSTimer
+
+        if self._timer is not None:
+            self._timer.invalidate()
+        self._timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            interval, self, b"tick:", None, True
+        )
+        self._tick_interval = interval
+
+    @objc.python_method
+    def _wake_main(self) -> None:
+        """Reveille le main thread pour un rendu immediat de la pastille.
+
+        Appele par le coeur (core.on_ui_state_change) depuis le thread du tap ou
+        du worker, a chaque changement d'etat UI. On planifie un tick sur le main
+        thread (en common modes, pour passer meme pendant un suivi de menu)."""
+        from Foundation import NSRunLoopCommonModes
+
+        self.performSelectorOnMainThread_withObject_waitUntilDone_modes_(
+            b"tick:", None, False, [NSRunLoopCommonModes]
+        )
+
     def tick_(self, timer):  # noqa: N802, ARG002
         # (Re)arme le tap des que la Surveillance des entrees est accordee.
+        # Court-circuit : une fois le tap en place, has_input_monitoring() (appel
+        # systeme) n'est plus jamais evalue.
         if core._tap is None and has_input_monitoring():
             core.install_event_tap()
 
@@ -392,7 +429,7 @@ class AppDelegate(NSObject):
         except queue.Empty:
             pass
 
-        self._refresh_menu()
+        # Onboarding ouvert : on rafraichit son etat (fenetre de config, breve).
         if self._onboarding is not None:
             self._update_onboarding_status()
             # Resultat du "Tester la clé" (calcule dans un thread reseau).
@@ -400,6 +437,20 @@ class AppDelegate(NSObject):
             if result is not None:
                 self._ob_keytest.setStringValue_(result)
                 self._keytest_result = None
+
+        # Cadence adaptative : rapide pendant enregistrement/transcription (la
+        # pastille est reaffirmee au premier plan souvent), lente sinon. NB:
+        # l'etat "cancelled" reste colle apres une annulation (le flash se
+        # termine tout seul via Core Animation), donc on ne le compte PAS comme
+        # actif, sinon on resterait en cadence rapide a vie. Le menu se rafraichit
+        # a son ouverture (menuNeedsUpdate:), pas ici.
+        desired = (
+            config.INDICATOR_TICK_SECONDS
+            if core._ui_state in ("recording", "transcribing")
+            else config.INDICATOR_TICK_IDLE_SECONDS
+        )
+        if desired != self._tick_interval:
+            self._schedule_timer(desired)
 
     # --- Actions du menu ---
     def enterApiKey_(self, sender):  # noqa: N802, ARG002
