@@ -174,7 +174,16 @@ window) instead of a project `.env`.
 Notes:
 
 - The build targets **your machine's architecture** (Intel or Apple Silicon).
-  For a single binary that runs on both, build with a `universal2` Python.
+  An **Intel (x86_64) build runs fine on Apple Silicon via Rosetta 2**, which
+  macOS offers to install automatically the first time you open the app. For a
+  lightweight menu-bar app the performance difference is imperceptible, so a
+  single Intel build already covers both platforms — which is how the published
+  releases are shipped.
+- If you ever want a **native `universal2` binary** (no Rosetta): it requires a
+  `universal2` Python from python.org (not the single-arch Python that `uv`
+  provides) and either `universal2` wheels or manually fused x86_64 + arm64
+  wheels for every native dependency (numpy, pydantic-core, PortAudio, pyobjc…).
+  Then add `target_arch="universal2"` to the `EXE(...)` in `MistralSTT.spec`.
 - The app is **not notarized**. With an Apple Developer ID you can sign and
   notarize it later (no code changes needed) to remove the first-launch warning.
 
