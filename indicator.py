@@ -4,9 +4,13 @@ Sur CHAQUE moniteur, une fenetre NSPanel sans bord, non activante, posee en
 bas-centre :
     rouge  = enregistrement en cours
     ambre  = transcription en cours (appel reseau)
+    bleu   = transcription en attente de reseau (re-tentee en fond)
+    vert (flash) = transcription differee recuperee (dans le presse-papier)
+    orange vif (flash) = echec DEFINITIF (erreur permanente : job abandonne)
     masquee = repos
 A l'annulation, la pastille passe au rouge puis s'estompe doucement avant de
-disparaitre (confirmation visuelle "jetee").
+disparaitre (confirmation visuelle "jetee") ; les flashes vert (recuperation)
+et orange (echec definitif) suivent la meme animation.
 
 Pourquoi une pastille par ecran + une reaffirmation du premier plan a chaque
 tick ? Pour qu'elle soit TOUJOURS visible sur la fenetre active :
@@ -46,7 +50,12 @@ _FADE_SECONDS = 0.45   # duree de l'estompage a l'annulation
 # echoue avec certaines versions de PyObjC (le pont renvoie un pointeur non
 # type), le calque reste transparent et la pastille est invisible.
 _RED = CGColorCreateGenericRGB(0.90, 0.16, 0.16, 1.0)    # enregistrement
-_AMBER = CGColorCreateGenericRGB(1.00, 0.65, 0.05, 1.0)  # transcription
+_AMBER = CGColorCreateGenericRGB(1.00, 0.65, 0.05, 1.0)  # transcription en cours
+_BLUE = CGColorCreateGenericRGB(0.15, 0.50, 0.95, 1.0)   # reprise en attente (reseau)
+_GREEN = CGColorCreateGenericRGB(0.20, 0.75, 0.35, 1.0)  # transcription recuperee (flash)
+# Orange vif reserve a l'ECHEC DEFINITIF (flash), distinct de l'ambre "en cours"
+# et du rouge "enregistrement" : ne se confond pas avec une simple attente reseau.
+_ERROR = CGColorCreateGenericRGB(1.00, 0.35, 0.00, 1.0)  # echec permanent (flash)
 
 
 def _rect_for(visible_frame):
@@ -137,9 +146,11 @@ class Indicator:
             panel.setAlphaValue_(1.0)
         self._visible = False
 
-    def _flash_out(self) -> None:
-        """Rouge vif puis estompage jusqu'a disparition (confirmation annulation)."""
-        self._set_color(_RED)
+    def _flash_out(self, color=_RED) -> None:
+        """Couleur vive puis estompage jusqu'a disparition (confirmation breve).
+
+        Rouge par defaut (annulation) ; vert pour une transcription recuperee."""
+        self._set_color(color)
         self._show()
 
         def _done() -> None:
@@ -161,8 +172,18 @@ class Indicator:
         elif state == "transcribing":
             self._set_color(_AMBER)
             self._show()
+        elif state == "retrying":
+            # Bleu : transcription en attente de reseau, re-tentee en fond.
+            self._set_color(_BLUE)
+            self._show()
+        elif state == "recovered":
+            # Flash vert : une transcription differee a ete recuperee (presse-papier).
+            self._flash_out(_GREEN)
+        elif state == "error":
+            # Flash orange vif : echec DEFINITIF (erreur permanente, job abandonne).
+            self._flash_out(_ERROR)
         elif state == "cancelled":
-            self._flash_out()
+            self._flash_out(_RED)
         else:  # "idle" ou inconnu
             self._hide()
 

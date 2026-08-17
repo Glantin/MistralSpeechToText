@@ -43,6 +43,28 @@ MISTRAL_MODEL = "voxtral-mini-latest"
 # On NE fixe PAS la langue : auto-detection du franglais (melange FR/EN).
 MISTRAL_LANGUAGE = None
 
+# --- Reseau / timeouts HTTP ----------------------------------------------
+# Sans timeout explicite, un changement/perte de reseau laisse la requete
+# SUSPENDUE indefiniment : le thread de transcription reste bloque et la
+# pastille se fige. On borne donc l'appel.
+#   - CONNECT court : un reseau mort echoue vite -> on bascule en reprise ;
+#   - READ genereux : couvre l'upload + la transcription d'un audio long.
+HTTP_CONNECT_TIMEOUT = 10.0   # secondes
+HTTP_READ_TIMEOUT = 180.0     # secondes
+
+# --- Reprise (file persistante) ------------------------------------------
+# Quand une transcription echoue (reseau), le WAV n'est PAS jete : il est
+# conserve et re-tente en tache de fond selon ce backoff (secondes ; la
+# derniere valeur est repetee ensuite), jusqu'a reussite. Ainsi un vocal
+# long n'est jamais perdu, meme apres un redemarrage de l'app.
+RETRY_BACKOFF_SECONDS = [2, 5, 15, 30, 60, 120, 300]
+# Plafond de tentatives TRANSITOIRES : au-dela, on abandonne meme sur du reseau
+# (garde-fou anti-boucle, en plus de l'age max). Une erreur PERMANENTE (400/401
+# /422...) est, elle, abandonnee des la 1re tentative (cf. transcribe_queue).
+RETRY_MAX_ATTEMPTS = 12
+# Au-dela de cet age, un job en attente est purge (garde-fou anti-accumulation).
+PENDING_MAX_AGE_SECONDS = 7 * 24 * 3600  # 7 jours
+
 # --- Feedback -------------------------------------------------------------
 # Sons systeme macOS joues aux transitions (None pour desactiver).
 SOUND_START = "/System/Library/Sounds/Tink.aiff"
@@ -79,3 +101,14 @@ HISTORY_PATH = os.path.join(
 )
 # Nombre d'entrees affichees par defaut par `history.py`.
 HISTORY_DEFAULT_N = 20
+
+# --- Stockage utilisateur (hors dossier projet) --------------------------
+# On range les donnees runtime a cote de la cle API, dans Application Support
+# (la .app packagee n'a pas de dossier projet inscriptible).
+import credentials  # noqa: E402  (evite un cycle : credentials n'importe pas config)
+
+# File de reprise : WAV en attente de transcription (+ sidecars .json).
+PENDING_DIR = os.path.join(credentials.APP_SUPPORT_DIR, "pending")
+# Dictionnaire de vocabulaire specifique (une entree par ligne, '#' = commentaire).
+# Passe tel quel a l'API via context_bias : aucune requete/credit en plus.
+VOCAB_FILE = os.path.join(credentials.APP_SUPPORT_DIR, "vocabulary.txt")

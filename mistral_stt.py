@@ -44,10 +44,9 @@ from Quartz import (
 )
 
 import config
-import history
+import transcribe_queue
 from audio import Recorder, list_input_devices
-from inserter import insert_at_cursor
-from transcribe import classify_error, transcribe
+from inserter import insert_at_cursor, set_clipboard
 
 DEBUG = bool(os.environ.get("MISTRAL_STT_DEBUG"))
 
@@ -64,11 +63,21 @@ _tap_thread = None
 _running = True
 
 # Etat de l'indicateur visuel, partage entre threads (lecture: main thread).
-# Valeurs: "idle" | "recording" | "transcribing" | "cancelled".
-# Une simple affectation de string est atomique sous le GIL et chaque transition
-# a un seul ecrivain, donc pas de lock necessaire ; le main thread ne fait que
-# le LIRE pour piloter la pastille.
+# Valeurs: "idle" | "recording" | "transcribing" | "retrying" | "recovered"
+#          | "error" | "cancelled".
+# Une simple affectation de string est atomique sous le GIL ; le main thread ne
+# fait que le LIRE pour piloter la pastille.
+#
+# La plupart des etats sont DERIVES de l'etat reel (cf. _recompute_ui) : le
+# drapeau d'enregistrement + les compteurs de la file de transcription. On evite
+# ainsi l'ancien bug ou le callback clavier ecrivait "recording" de facon
+# optimiste et ou SEUL le worker (parfois gele sur un appel reseau) pouvait le
+# remettre a "idle" -> pastille coincee en rouge. Desormais l'etat "recording"
+# est adosse a un drapeau que le tap LEVE et BAISSE lui-meme.
 _ui_state = "idle"
+
+# Drapeau : un enregistrement micro est actif (leve/baisse par le tap clavier).
+_recording_active = False
 
 # Hook optionnel invoque (depuis N'IMPORTE quel thread) a chaque changement de
 # _ui_state. app.py y branche un reveil du main thread (performSelectorOnMainThread)
@@ -89,24 +98,67 @@ def _set_ui_state(value: str) -> None:
             pass
 
 
+def _recompute_ui() -> None:
+    """Recalcule la pastille a partir de l'etat REEL, par ordre de priorite.
+
+    recording (drapeau tap) > transcribing (tentative en cours) > retrying
+    (jobs en attente de reseau) > idle. Les etats transitoires "cancelled" et
+    "recovered" (flash) sont poses directement ailleurs et NE passent PAS par ici
+    (leur animation se termine seule ; aucun recompute ne les ecrase tant qu'aucun
+    autre evenement ne survient)."""
+    if _recording_active:
+        state = "recording"
+    elif transcribe_queue.active_count() > 0:
+        state = "transcribing"
+    elif transcribe_queue.pending_count() > 0:
+        state = "retrying"
+    else:
+        state = "idle"
+    _set_ui_state(state)
+
+
 # File des erreurs utilisateur (ex: cle invalide, reseau, proxy TLS). Le worker
 # y depose un message ; l'app (app.py) la draine sur le main thread pour afficher
 # une notification macOS. En mode CLI, l'erreur reste seulement imprimee.
 errors: "queue.Queue[str]" = queue.Queue()
 
+# File des notifications POSITIVES (ex: transcription differee recuperee). Drainee
+# comme `errors` par l'app (app.py) en notification macOS.
+notices: "queue.Queue[str]" = queue.Queue()
+
+
+def _deliver_immediate(text: str) -> None:
+    """Livraison d'une transcription reussie du 1er coup : collage au curseur."""
+    print(f"[mistral-stt] insere ({len(text)} caracteres):")
+    print(text)
+    insert_at_cursor(text, restore=not config.KEEP_LAST_IN_CLIPBOARD)
+
+
+def _deliver_deferred(text: str) -> None:
+    """Livraison d'une transcription RECUPEREE apres coup (reprise reseau).
+
+    On NE colle PAS au curseur (il a bouge depuis) : on place le texte dans le
+    presse-papier, on signale par la pastille (flash vert) et une notification."""
+    print(f"[mistral-stt] transcription recuperee ({len(text)} caracteres):")
+    print(text)
+    set_clipboard(text)
+    _set_ui_state("recovered")  # flash vert (confirmation visuelle)
+    notices.put("Transcription récupérée — dans le presse-papier ✅")
+
+
+def _deliver_error(message: str) -> None:
+    """Echec DEFINITIF d'un job (erreur permanente : args/auth/validation).
+
+    On NE reste PAS bleu (attente reseau) : flash orange vif (pastille erreur)
+    + notification claire, puis retour idle. Distinct d'une simple attente."""
+    print(f"[mistral-stt] echec definitif : {message}")
+    _set_ui_state("error")  # flash orange (echec, distinct du bleu 'en attente')
+    errors.put(message)
+
 
 def _log(msg: str) -> None:
     if DEBUG:
         print(f"[mistral-stt:debug] {msg}")
-
-
-def _friendly_error(exc: Exception) -> str:
-    """Traduit une exception de transcription en message court et actionnable.
-
-    Delegue au classifieur partage (transcribe.classify_error) : le SSL/proxy y
-    est teste AVANT l'auth, donc un blocage proxy n'est plus etiquete "cle".
-    """
-    return classify_error(exc)[1]
 
 
 def _play(sound: str | None) -> None:
@@ -119,13 +171,14 @@ def _play(sound: str | None) -> None:
 
 
 def _worker() -> None:
-    """Execute start/stop/transcription HORS du thread du tap.
+    """Execute start/stop/cancel du micro HORS du thread du tap.
 
     Le callback du tap doit rester ultra-rapide : s'il bloque (ouverture du
-    flux micro, appel reseau...), macOS desactive le tap et plus aucun
-    evenement n'arrive (dont le relachement). On deporte donc tout ici.
+    flux micro...), macOS desactive le tap et plus aucun evenement n'arrive
+    (dont le relachement). On deporte donc l'enregistrement ici. La transcription,
+    elle, vit sur un thread encore separe (transcribe_queue) : on ENFILE la prise
+    et on rend la main immediatement.
     """
-    global _ui_state
     while True:
         action = _actions.get()
         if action == "__quit__":
@@ -149,37 +202,18 @@ def _worker() -> None:
             _play(config.SOUND_DONE)
             if not wav_path:
                 print("[mistral-stt] (rien a transcrire)")
-                _set_ui_state("idle")
+                _recompute_ui()
                 continue
-            _set_ui_state("transcribing")
-            try:
-                text = transcribe(wav_path)
-                if text:
-                    # On imprime le texte complet dans le terminal : il sert
-                    # d'historique copiable a la main si le collage s'est perdu.
-                    print(f"[mistral-stt] insere ({len(text)} caracteres):")
-                    print(text)
-                    # Journalise AVANT le collage : la trace existe meme si le
-                    # collage se perd (aucun champ texte focalise).
-                    history.append(text)
-                    insert_at_cursor(
-                        text, restore=not config.KEEP_LAST_IN_CLIPBOARD
-                    )
-                else:
-                    print("[mistral-stt] (transcription vide)")
-            except Exception as exc:  # noqa: BLE001
-                print(f"[mistral-stt] erreur transcription: {exc}")
-                errors.put(_friendly_error(exc))
-            finally:
-                _set_ui_state("idle")
-                try:
-                    os.remove(wav_path)
-                except OSError:
-                    pass
+            # On ENFILE la prise (thread de transcription separe + reprise
+            # persistante). La transcription ne bloque plus ce worker : un appel
+            # reseau lent/coupe n'empeche plus un nouvel enregistrement, et l'audio
+            # est conserve sur disque jusqu'a obtention d'un transcript.
+            print("[mistral-stt] transcription en cours...")
+            transcribe_queue.enqueue(wav_path)
 
 
 def _tap_callback(proxy, type_, event, refcon):  # noqa: ARG001
-    global state, _ui_state
+    global state, _ui_state, _recording_active
 
     # Le systeme peut desactiver le tap (callback trop lent, evenement clavier
     # special). Il faut le reactiver, sinon plus aucun evenement n'arrive.
@@ -200,16 +234,24 @@ def _tap_callback(proxy, type_, event, refcon):  # noqa: ARG001
             if is_down:
                 if state == IDLE:
                     state = RECORDING_PTT
-                    # Reste ultra rapide : on note l'etat + on reveille l'UI
-                    # (la pastille apparait des l'appui, latence minimale).
-                    _set_ui_state("recording")
+                    # Reste ultra rapide : on LEVE le drapeau d'enregistrement et
+                    # on recalcule la pastille (rouge des l'appui, latence minimale).
+                    # Le drapeau est ABAISSE par ce meme callback au relachement,
+                    # donc la pastille ne peut plus rester coincee en rouge meme si
+                    # la transcription (autre thread) est lente/bloquee.
+                    _recording_active = True
+                    _recompute_ui()
                     _actions.put("start")
                 elif state == RECORDING_CONTINUOUS:
                     state = IDLE
+                    _recording_active = False
+                    _recompute_ui()
                     _actions.put("stop")
             else:  # relachement
                 if state == RECORDING_PTT:
                     state = IDLE
+                    _recording_active = False
+                    _recompute_ui()
                     _actions.put("stop")
             return event
 
@@ -227,7 +269,8 @@ def _tap_callback(proxy, type_, event, refcon):  # noqa: ARG001
         if type_ == kCGEventKeyDown and keycode == config.ESCAPE_KEYCODE:
             if state in (RECORDING_PTT, RECORDING_CONTINUOUS):
                 state = IDLE
-                _set_ui_state("cancelled")  # arme le flash de confirmation
+                _recording_active = False
+                _set_ui_state("cancelled")  # arme le flash de confirmation (direct)
                 _actions.put("cancel")
                 return None  # on avale l'Echap (uniquement pendant un enregistrement)
 
@@ -247,10 +290,38 @@ def _sigint(signum, frame):  # noqa: ARG001
 # --- Coeur partage (reutilise par mistral_stt.py CLI ET par app.py) --------
 
 def start_worker() -> "threading.Thread":
-    """Demarre le thread worker (traitement start/stop/transcription)."""
+    """Demarre le thread worker d'ENREGISTREMENT (start/stop/cancel du micro).
+
+    La transcription vit sur un thread separe (start_transcribe_worker) : ce
+    worker-ci ne fait que des operations rapides (ouverture/fermeture du micro,
+    ecriture WAV, mise en file), il ne bloque jamais sur le reseau."""
     t = threading.Thread(target=_worker, daemon=True)
     t.start()
     return t
+
+
+def start_transcribe_worker() -> "threading.Thread | None":
+    """Branche les callbacks (etat/livraison) et demarre le worker de transcription.
+
+    Idempotent. A appeler une fois au demarrage (CLI et .app)."""
+    transcribe_queue.on_state_change = _recompute_ui
+    transcribe_queue.deliver_immediate = _deliver_immediate
+    transcribe_queue.deliver_deferred = _deliver_deferred
+    transcribe_queue.on_error = errors.put
+    transcribe_queue.on_permanent_error = _deliver_error
+    # Cree le dictionnaire de vocabulaire (avec en-tete d'aide) s'il manque.
+    try:
+        import transcribe as _t
+
+        _t.ensure_vocab_file()
+    except Exception:  # noqa: BLE001
+        pass
+    return transcribe_queue.start()
+
+
+def recover_pending() -> int:
+    """Reprend les prises en attente laissees par une session precedente."""
+    return transcribe_queue.recover_pending()
 
 
 def _tap_thread_main(ready: "threading.Event", result: dict) -> None:
@@ -352,6 +423,10 @@ def main() -> None:
             indicator = None
 
     start_worker()
+    start_transcribe_worker()
+    n = recover_pending()
+    if n:
+        print(f"[mistral-stt] {n} prise(s) en attente reprise(s) (reseau).")
 
     if not install_event_tap():
         print(
@@ -383,6 +458,9 @@ def main() -> None:
         if indicator is None:
             tick = 0.25
         elif _ui_state in ("recording", "transcribing"):
+            # "retrying"/"recovered" (attente reseau / flash) restent en cadence
+            # repos : la transition rend la pastille immediatement (via
+            # on_ui_state_change), inutile d'imposer un 10 Hz permanent.
             tick = config.INDICATOR_TICK_SECONDS
         else:
             # Repos (y compris "cancelled" apres le flash) : cadence lente.

@@ -34,6 +34,7 @@ a = Analysis(
         "config",
         "credentials",
         "transcribe",
+        "transcribe_queue",
         "audio",
         "inserter",
         "indicator",

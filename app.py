@@ -193,8 +193,15 @@ class AppDelegate(NSObject):
         # la cle API ; sans ce menu, Cmd+V ne colle pas).
         self._install_main_menu()
 
-        # Coeur partage : worker + (tentative) event tap.
+        # Coeur partage : worker d'enregistrement + worker de transcription
+        # (thread separe, file persistante avec reprise) + (tentative) event tap.
         core.start_worker()
+        core.start_transcribe_worker()
+        n = core.recover_pending()  # reprend les prises en attente d'une session precedente
+        if n:
+            core.notices.put(
+                f"{n} dictée(s) en attente reprise(s) — transcription en cours…"
+            )
         core.install_event_tap()  # peut echouer tant que la permission manque
 
         self._build_status_item()
@@ -345,6 +352,9 @@ class AppDelegate(NSObject):
         )
         menu.addItem_(self._login_item)
         menu.addItem_(self._mk_item("Permissions…", b"showOnboarding:"))
+        menu.addItem_(
+            self._mk_item("Dictionnaire de vocabulaire…", b"openVocabulary:")
+        )
         menu.addItem_(NSMenuItem.separatorItem())
         menu.addItem_(self._mk_item("Quitter", b"quitApp:"))
 
@@ -429,6 +439,13 @@ class AppDelegate(NSObject):
         except queue.Empty:
             pass
 
+        # Notifications POSITIVES (ex: transcription differee recuperee).
+        try:
+            while True:
+                _notify(core.notices.get_nowait())
+        except queue.Empty:
+            pass
+
         # Onboarding ouvert : on rafraichit son etat (fenetre de config, breve).
         if self._onboarding is not None:
             self._update_onboarding_status()
@@ -440,10 +457,12 @@ class AppDelegate(NSObject):
 
         # Cadence adaptative : rapide pendant enregistrement/transcription (la
         # pastille est reaffirmee au premier plan souvent), lente sinon. NB:
-        # l'etat "cancelled" reste colle apres une annulation (le flash se
-        # termine tout seul via Core Animation), donc on ne le compte PAS comme
-        # actif, sinon on resterait en cadence rapide a vie. Le menu se rafraichit
-        # a son ouverture (menuNeedsUpdate:), pas ici.
+        # les etats "cancelled" et "recovered" restent colles apres leur flash
+        # (l'animation se termine seule via Core Animation), donc on ne les compte
+        # PAS comme actifs, sinon on resterait en cadence rapide a vie. "retrying"
+        # (attente reseau) peut durer longtemps : on le laisse aussi en cadence
+        # REPOS (0,75 s suffit a reaffirmer le premier plan ; evite un 10 Hz
+        # permanent). Le menu se rafraichit a son ouverture (menuNeedsUpdate:).
         desired = (
             config.INDICATOR_TICK_SECONDS
             if core._ui_state in ("recording", "transcribing")
@@ -464,6 +483,29 @@ class AppDelegate(NSObject):
             credentials.set_api_key(value.strip())
             transcribe.reset_client()
             self._preflight_key_check()
+
+    def openVocabulary_(self, sender):  # noqa: N802, ARG002
+        """Ouvre le dictionnaire de vocabulaire (context_bias) dans l'editeur.
+
+        Le cree avec un en-tete d'aide s'il n'existe pas encore. Une entree par
+        ligne ; ces termes biaisent la transcription (aucune requete/credit en
+        plus, aucun resume)."""
+        try:
+            path = transcribe.ensure_vocab_file()
+            subprocess.Popen(["open", "-t", path])
+            # Avertit si des lignes sont ignorees (espace/virgule -> invalides pour
+            # l'API) : elles n'influencent pas la transcription, l'utilisateur doit
+            # les decouper en mots. Non bloquant (notification).
+            ignored = transcribe.ignored_bias_terms()
+            if ignored:
+                sample = ", ".join(ignored[:3])
+                more = "…" if len(ignored) > 3 else ""
+                _notify(
+                    f"{len(ignored)} terme(s) ignoré(s) (espace/virgule) : "
+                    f"{sample}{more}. Un seul mot par ligne."
+                )
+        except Exception as exc:  # noqa: BLE001
+            self._alert("Dictionnaire indisponible", str(exc))
 
     def toggleLogin_(self, sender):  # noqa: N802, ARG002
         ok, msg = set_login_enabled(not login_enabled())
