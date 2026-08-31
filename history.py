@@ -1,14 +1,14 @@
-"""Historique des transcriptions MistralSpeechToText.
+"""MistralSpeechToText transcription history.
 
-Chaque transcription reussie est journalisee dans history.jsonl (une ligne
-JSON par entree). Utile quand le collage se perd (aucun champ texte focalise) :
-on peut retrouver le texte et le recopier.
+Every successful transcription is logged to history.jsonl (one JSON line per
+entry). Useful when a paste is lost (no text field focused): you can find the
+text and copy it again.
 
-Usage CLI :
-    uv run python history.py            # affiche les N dernieres entrees
-    uv run python history.py -n 5       # les 5 dernieres
-    uv run python history.py --copy     # recopie la derniere dans le presse-papier
-    uv run python history.py --last     # alias de --copy
+CLI usage:
+    uv run python history.py            # show the last N entries
+    uv run python history.py -n 5       # the last 5
+    uv run python history.py --copy     # copy the last one to the clipboard
+    uv run python history.py --last     # alias of --copy
 """
 
 import argparse
@@ -19,7 +19,7 @@ import config
 
 
 def append(text: str) -> None:
-    """Ajoute une entree a l'historique. Ne leve jamais (best-effort)."""
+    """Append an entry to the history. Never raises (best-effort)."""
     if not text:
         return
     entry = {
@@ -31,12 +31,12 @@ def append(text: str) -> None:
         with open(config.HISTORY_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except OSError:
-        # L'historique ne doit jamais casser le flux de dictee.
+        # History must never break the dictation flow.
         pass
 
 
 def read(n: int) -> list[dict]:
-    """Retourne les `n` dernieres entrees valides (les plus recentes en dernier)."""
+    """Return the last `n` valid entries (most recent last)."""
     try:
         with open(config.HISTORY_PATH, encoding="utf-8") as f:
             lines = f.readlines()
@@ -50,12 +50,12 @@ def read(n: int) -> list[dict]:
         try:
             entries.append(json.loads(line))
         except json.JSONDecodeError:
-            continue  # ligne corrompue : on l'ignore
+            continue  # corrupted line: skip it
     return entries[-n:] if n > 0 else entries
 
 
 def _fmt_ts(iso: str) -> str:
-    """Rend un timestamp ISO lisible (sans planter si format inattendu)."""
+    """Render an ISO timestamp readably (without crashing on odd formats)."""
     try:
         return datetime.fromisoformat(iso).strftime("%Y-%m-%d %H:%M:%S")
     except (ValueError, TypeError):
@@ -64,7 +64,7 @@ def _fmt_ts(iso: str) -> str:
 
 def _print_entries(entries: list[dict]) -> None:
     if not entries:
-        print("(historique vide)")
+        print("(history empty)")
         return
     for e in entries:
         ts = _fmt_ts(e.get("ts", ""))
@@ -75,33 +75,33 @@ def _print_entries(entries: list[dict]) -> None:
 def _copy_last() -> None:
     entries = read(1)
     if not entries:
-        print("(historique vide : rien a copier)")
+        print("(history empty: nothing to copy)")
         return
     text = entries[-1].get("text", "")
     if not text:
-        print("(derniere entree vide : rien a copier)")
+        print("(last entry empty: nothing to copy)")
         return
-    # Import tardif : evite de charger AppKit quand on ne fait qu'afficher.
+    # Late import: avoid loading AppKit when we only display.
     from inserter import set_clipboard
 
     set_clipboard(text)
-    print(f"copie dans le presse-papier ({len(text)} caracteres) : {text}")
+    print(f"copied to the clipboard ({len(text)} characters): {text}")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Historique des transcriptions MistralSpeechToText.")
+    parser = argparse.ArgumentParser(description="MistralSpeechToText transcription history.")
     parser.add_argument(
         "-n",
         type=int,
         default=config.HISTORY_DEFAULT_N,
-        help=f"nombre d'entrees a afficher (defaut {config.HISTORY_DEFAULT_N})",
+        help=f"number of entries to show (default {config.HISTORY_DEFAULT_N})",
     )
     parser.add_argument(
         "--copy",
         "--last",
         dest="copy",
         action="store_true",
-        help="recopie la derniere transcription dans le presse-papier",
+        help="copy the last transcription to the clipboard",
     )
     args = parser.parse_args()
 

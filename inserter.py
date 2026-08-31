@@ -1,8 +1,8 @@
-"""Insertion de texte au curseur via presse-papier + Cmd+V synthetique.
+"""Insert text at the cursor via clipboard + a synthetic Cmd+V.
 
-On passe par le presse-papier plutot que par une frappe caractere-par-caractere :
-c'est instantane et ca gere proprement les accents / le franglais. Le contenu
-precedent du presse-papier est sauvegarde puis restaure.
+We go through the clipboard rather than typing character by character: it is
+instant and handles accents / mixed-language text cleanly. The previous
+clipboard contents are saved and then restored.
 """
 
 import time
@@ -16,17 +16,17 @@ from Quartz import (
     kCGHIDEventTap,
 )
 
-_V_KEYCODE = 9  # touche "v"
+_V_KEYCODE = 9  # the "v" key
 
 
 def set_clipboard(text: str) -> None:
-    """Place `text` dans le presse-papier general (API publique reutilisable)."""
+    """Put `text` on the general pasteboard (reusable public API)."""
     pb = NSPasteboard.generalPasteboard()
     pb.clearContents()
     pb.setString_forType_(text, NSStringPboardType)
 
 
-# Alias interne historique.
+# Historical internal alias.
 _set_clipboard = set_clipboard
 
 
@@ -45,26 +45,26 @@ def _send_cmd_v() -> None:
 
 
 def insert_at_cursor(text: str, restore: bool = True) -> None:
-    """Colle `text` la ou est le curseur.
+    """Paste `text` wherever the cursor is.
 
-    Si `restore` est vrai (defaut), l'ancien contenu du presse-papier est
-    restaure apres le collage. Si faux, on laisse `text` dans le presse-papier
-    comme filet de securite (cf. config.KEEP_LAST_IN_CLIPBOARD).
+    If `restore` is true (default), the previous clipboard contents are restored
+    after pasting. If false, `text` is left on the clipboard as a safety net
+    (see config.KEEP_LAST_IN_CLIPBOARD).
     """
     if not text:
         return
     previous = _get_clipboard()
     set_clipboard(text)
-    # Petit delai pour laisser le presse-papier se propager avant le collage.
+    # Small delay to let the clipboard propagate before pasting.
     time.sleep(0.05)
     _send_cmd_v()
-    # Laisse l'app cible consommer le collage avant de restaurer.
+    # Let the target app consume the paste before restoring.
     time.sleep(0.15)
     if restore and previous is not None:
         set_clipboard(previous)
 
 
 if __name__ == "__main__":
-    print("Insertion dans 2 s : place ton curseur dans un champ texte...")
+    print("Inserting in 2 s: place your cursor in a text field...")
     time.sleep(2)
-    insert_at_cursor("mistral-stt test : c'est un quick check")
+    insert_at_cursor("mistral-stt test: this is a quick check")

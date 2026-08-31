@@ -1,8 +1,8 @@
-"""Genere l'icone de l'app : micro blanc sur carre arrondi en degrade orange.
+"""Generate the app icon: a white mic on a rounded square with an orange gradient.
 
-Outil de dev (pas embarque dans l'app). Rend un PNG 1024 px via AppKit, puis
-construit l'iconset multi-resolutions et `assets/AppIcon.icns` (consomme par
-MistralSTT.spec lors du build).
+Dev tool (not bundled in the app). Renders a 1024 px PNG via AppKit, then builds
+the multi-resolution iconset and `assets/AppIcon.icns` (consumed by
+MistralSTT.spec at build time).
 
     uv run python make_icon.py
 """
@@ -35,10 +35,10 @@ S = 1024
 
 
 def _white_mic(side: float) -> NSImage:
-    """SF Symbol mic.fill rendu en blanc plein (les symboles sont des templates)."""
+    """SF Symbol mic.fill rendered as solid white (symbols are templates)."""
     sym = NSImage.imageWithSystemSymbolName_accessibilityDescription_("mic.fill", None)
     conf = NSImageSymbolConfiguration.configurationWithPointSize_weight_scale_(
-        side, 0.0, 3  # poids regular, echelle large
+        side, 0.0, 3  # regular weight, large scale
     )
     sym = sym.imageWithSymbolConfiguration_(conf)
     size = sym.size()
@@ -62,7 +62,7 @@ def render_master() -> None:
     NSGraphicsContext.saveGraphicsState()
     NSGraphicsContext.setCurrentContext_(ctx)
 
-    # Carre arrondi (style "squircle" macOS) avec degrade orange -> ambre.
+    # Rounded square (macOS "squircle" style) with an orange -> amber gradient.
     inset = S * 0.085
     rect = NSMakeRect(inset, inset, S - 2 * inset, S - 2 * inset)
     radius = (S - 2 * inset) * 0.235
@@ -70,9 +70,9 @@ def render_master() -> None:
     amber = NSColor.colorWithSRGBRed_green_blue_alpha_(1.00, 0.66, 0.07, 1.0)
     orange = NSColor.colorWithSRGBRed_green_blue_alpha_(0.95, 0.34, 0.12, 1.0)
     grad = NSGradient.alloc().initWithStartingColor_endingColor_(orange, amber)
-    grad.drawInBezierPath_angle_(path, 90.0)  # orange en bas, ambre en haut
+    grad.drawInBezierPath_angle_(path, 90.0)  # orange at the bottom, amber at the top
 
-    # Micro blanc centre.
+    # White mic, centered.
     mic = _white_mic(S * 0.46)
     msize = mic.size()
     target_h = S * 0.52

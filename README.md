@@ -9,6 +9,25 @@ transcriber, so it auto-detects what you speak and handles many languages. You
 can even switch languages mid sentence (for example "franglais", French and
 English mixed) and it still works.
 
+## Demo
+
+![Architecture — key press → microphone → persistent queue → Mistral Voxtral → paste at cursor](assets/architecture.svg)
+
+<!--
+Screenshots / GIF go here once captured. Drop the files in assets/screenshots/
+and reference them, for example:
+
+![Menu-bar app and setup window](assets/screenshots/menubar.png)
+![Dictating into any app (demo)](assets/screenshots/demo.gif)
+
+Capture tips (macOS):
+- Still:   Shift-Cmd-4 (drag a region) or Shift-Cmd-5 for the capture toolbar.
+- Video:   Shift-Cmd-5 → Record Selected Portion → Stop from the menu bar.
+- To GIF:  ffmpeg -i demo.mov -vf "fps=12,scale=900:-1:flags=lanczos" assets/screenshots/demo.gif
+           (or use Gifski / any .mov→.gif tool).
+Keep the floating dot in frame so the recording state is visible.
+-->
+
 ## What it does
 
 - **Hold the RIGHT Option key (⌥)**, speak, then **release**. The text is
@@ -19,10 +38,19 @@ English mixed) and it still works.
   pasted).
 - The **left Option key stays free** so you can still type accents (é, è, ç...).
 
-A small **floating dot** appears at the bottom center of your screen while in
-use: **red** = recording, **amber** = transcribing, **hidden** = idle. On
-cancel it flashes red and fades out. It stays visible across all Spaces,
-including over full-screen apps.
+A small **floating dot follows your cursor** while in use, so it's always where
+you're looking, on the active window: **red** = recording, **amber** =
+transcribing, **hidden** = idle. On cancel it flashes red and fades out. It
+stays visible across all Spaces, including over full-screen apps. (Set
+`INDICATOR_FOLLOW_CURSOR = False` in `config.py` to pin it at the bottom center
+instead.)
+
+A single take has a **recording limit** — the one place a very long take is cut
+(audio past it isn't captured). It defaults to **10 minutes** to keep memory low
+and is adjustable up to **60 minutes** (the Mistral Voxtral API's own limit) from
+the menu-bar **Recording limit…** item. About **1.5 minutes before** that limit,
+the dot turns a **pulsing pink-red** and a short sound plays **once** to nudge you
+to wrap up and send — recording is **never** interrupted by the warning itself.
 
 ## Install the app (recommended, ~5 minutes)
 
@@ -38,9 +66,9 @@ Download the prebuilt macOS app — no terminal, no Python, no `uv`.
    It then lives in the **menu bar** (🎙), not the Dock.
 4. A **setup window** opens. Do these three things:
    - **API key** — paste your Mistral key (see
-     [Get a Mistral API key](#get-a-mistral-api-key-free)), click **Enregistrer**,
-     then **Tester la clé** to confirm.
-   - **Permissions** — click each **Autoriser** button (it opens the right
+     [Get a Mistral API key](#get-a-mistral-api-key-free)), click **Save**,
+     then **Test the key** to confirm.
+   - **Permissions** — click each **Allow** button (it opens the right
      System Settings pane), turn the switch on, and come back: the line turns ✅.
      The three are Microphone, Input Monitoring (to detect Right Option) and
      Accessibility (to paste).

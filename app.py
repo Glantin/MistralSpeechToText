@@ -1,21 +1,19 @@
-"""MistralSpeechToText — point d'entree de l'application macOS (.app).
+"""MistralSpeechToText — entry point of the macOS app (.app).
 
-App en barre de menus (pas d'icone dans le Dock) : maintien **Option droite**
-pour dicter, comme en mode CLI. On REUTILISE tout le coeur de `mistral_stt.py`
-(event tap clavier + worker + etat partage `_ui_state`) ; seule la facon de
-tourner change :
+A menu-bar app (no Dock icon): hold **Right Option** to dictate, just like in CLI
+mode. We REUSE the whole core of `mistral_stt.py` (keyboard event tap + worker +
+shared `_ui_state`); only the way it runs changes:
 
-  - `NSApplication.run()` (boucle AppKit) au lieu de la boucle manuelle
-    `CFRunLoopRunInMode` du mode CLI ;
-  - un `NSStatusItem` (menu) : cle API, lancer au demarrage, permissions,
-    quitter ;
-  - un **onboarding** au 1er lancement, car une .app ne peut PAS s'auto-accorder
-    Micro / Surveillance des entrees / Accessibilite : on declenche les pop-ups
-    systeme et on ouvre directement le bon volet des Reglages.
+  - `NSApplication.run()` (the AppKit loop) instead of the manual
+    `CFRunLoopRunInMode` loop of CLI mode;
+  - an `NSStatusItem` (menu): API key, launch at login, permissions, quit;
+  - an **onboarding** on first launch, because a .app cannot self-grant
+    Microphone / Input Monitoring / Accessibility: we trigger the system prompts
+    and open the right Settings pane directly.
 
-THREADING : AppKit n'est pas thread-safe. Le delegue, le menu, l'onboarding et
-l'indicateur vivent sur le MAIN THREAD (la boucle NSApp.run()). Le worker tourne
-dans un thread daemon (importe de mistral_stt) et ne touche QUE l'etat partage.
+THREADING: AppKit is not thread-safe. The delegate, the menu, the onboarding and
+the indicator live on the MAIN THREAD (the NSApp.run() loop). The worker runs in
+a daemon thread (imported from mistral_stt) and only touches the shared state.
 """
 
 import os
@@ -27,8 +25,6 @@ import threading
 import time
 
 import objc
-from Foundation import NSBundle
-
 from AppKit import (
     NSApplication,
     NSApplicationActivationPolicyAccessory,
@@ -54,15 +50,17 @@ from ApplicationServices import (
     AXIsProcessTrustedWithOptions,
     kAXTrustedCheckOptionPrompt,
 )
+from Foundation import NSBundle
 from Quartz import CGPreflightListenEventAccess, CGRequestListenEventAccess
 
 import config
 import credentials
 import mistral_stt as core
+import settings
 import transcribe
 
-# Volets des Reglages Systeme (deep-links). Ouvrent directement le bon onglet
-# Confidentialite & securite plutot que de laisser l'utilisateur chercher.
+# System Settings panes (deep links). Open the right Privacy & Security tab
+# directly instead of leaving the user to hunt for it.
 _PANE_MIC = "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
 _PANE_INPUT = "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
 _PANE_AX = "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
@@ -73,7 +71,7 @@ def _open_pane(url: str) -> None:
 
 
 def _notify(message: str, title: str = "MistralSTT") -> None:
-    """Affiche une notification macOS (via osascript : aucune permission a demander)."""
+    """Show a macOS notification (via osascript: no permission to request)."""
     msg = message.replace('\\', '').replace('"', "'")
     ttl = title.replace('"', "'")
     subprocess.Popen(
@@ -83,33 +81,33 @@ def _notify(message: str, title: str = "MistralSTT") -> None:
     )
 
 
-# --- Etat des permissions --------------------------------------------------
+# --- Permission state ------------------------------------------------------
 
 def has_input_monitoring() -> bool:
-    """Surveillance des entrees accordee ? (necessaire pour capter Option droite)."""
+    """Input Monitoring granted? (needed to capture Right Option)."""
     return bool(CGPreflightListenEventAccess())
 
 
 def request_input_monitoring() -> None:
-    """Declenche le pop-up systeme Surveillance des entrees (une seule fois)."""
+    """Trigger the system Input Monitoring prompt (only once)."""
     CGRequestListenEventAccess()
 
 
 def has_accessibility() -> bool:
-    """Accessibilite accordee ? (necessaire pour coller via Cmd+V)."""
+    """Accessibility granted? (needed to paste via Cmd+V)."""
     return bool(AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: False}))
 
 
 def request_accessibility() -> None:
-    """Declenche le pop-up systeme Accessibilite."""
+    """Trigger the system Accessibility prompt."""
     AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: True})
 
 
 def trigger_microphone_prompt() -> None:
-    """Ouvre brievement le micro pour declencher le pop-up d'autorisation.
+    """Briefly open the mic to trigger the authorization prompt.
 
-    On evite une dependance AVFoundation : ouvrir un flux sounddevice suffit a
-    faire apparaitre la demande systeme la premiere fois. Sans effet ensuite.
+    We avoid an AVFoundation dependency: opening a sounddevice stream is enough
+    to make the system prompt appear the first time. No effect afterwards.
     """
     def _go() -> None:
         try:
@@ -128,10 +126,10 @@ def trigger_microphone_prompt() -> None:
     threading.Thread(target=_go, daemon=True).start()
 
 
-# --- Lancer au demarrage (SMAppService) ------------------------------------
+# --- Launch at login (SMAppService) ----------------------------------------
 
 def _login_service():
-    """SMAppService de l'app courante, ou None si indisponible (ex: lance hors .app)."""
+    """SMAppService for the current app, or None if unavailable (e.g. run outside a .app)."""
     try:
         from ServiceManagement import SMAppService
 
@@ -152,10 +150,10 @@ def login_enabled() -> bool:
 
 
 def set_login_enabled(enabled: bool) -> tuple[bool, str]:
-    """(Des)active le lancement au login. Renvoie (succes, message)."""
+    """(De)activate launch at login. Returns (success, message)."""
     svc = _login_service()
     if svc is None:
-        return False, "Indisponible (lance hors de l'app .app)."
+        return False, "Unavailable (running outside the .app)."
     try:
         if enabled:
             ok, err = svc.registerAndReturnError_(None)
@@ -168,17 +166,17 @@ def set_login_enabled(enabled: bool) -> tuple[bool, str]:
         return False, str(exc)
 
 
-# --- Delegue de l'application ----------------------------------------------
+# --- Application delegate ---------------------------------------------------
 
 class AppDelegate(NSObject):
     def applicationDidFinishLaunching_(self, notification):  # noqa: N802, ARG002
-        # 1er lancement depuis Telechargements : proposer le deplacement dans
-        # /Applications (chemin canonique, autorisations stables). Si on lance
-        # le deplacement, l'app se relance de la-bas et on s'arrete ici.
+        # First launch from Downloads: offer to move into /Applications (canonical
+        # path, stable permissions). If we start the move, the app relaunches from
+        # there and we stop here.
         if self._maybe_offer_move_to_applications():
             return
 
-        # Indicateur visuel (pastille). Cree sur le main thread.
+        # Visual indicator (dot). Created on the main thread.
         try:
             from indicator import Indicator
 
@@ -188,65 +186,65 @@ class AppDelegate(NSObject):
         self._last_rendered = None
         self._onboarding = None
 
-        # Menu principal (invisible pour une app LSUIElement, mais indispensable :
-        # c'est lui qui apporte les raccourcis Cmd+C/V/X/A au champ de saisie de
-        # la cle API ; sans ce menu, Cmd+V ne colle pas).
+        # Main menu (invisible for an LSUIElement app, but essential: it is what
+        # brings the Cmd+C/V/X/A shortcuts to the API-key input field; without
+        # this menu, Cmd+V does not paste).
         self._install_main_menu()
 
-        # Coeur partage : worker d'enregistrement + worker de transcription
-        # (thread separe, file persistante avec reprise) + (tentative) event tap.
+        # Shared core: recording worker + transcription worker (separate thread,
+        # persistent retry queue) + (attempt at) the event tap.
         core.start_worker()
         core.start_transcribe_worker()
-        n = core.recover_pending()  # reprend les prises en attente d'une session precedente
+        n = core.recover_pending()  # resume takes pending from a previous session
         if n:
             core.notices.put(
-                f"{n} dictée(s) en attente reprise(s) — transcription en cours…"
+                f"{n} pending dictation(s) resumed — transcribing…"
             )
-        core.install_event_tap()  # peut echouer tant que la permission manque
+        core.install_event_tap()  # may fail while the permission is missing
 
         self._build_status_item()
 
-        # Onboarding au 1er lancement : pas de cle OU permissions manquantes.
+        # Onboarding on first launch: no key OR missing permissions.
         if not credentials.has_api_key() or not self._all_permissions_ok():
             self.showOnboarding_(None)
 
-        # Timer a cadence ADAPTATIVE : lente au repos, rapide quand la pastille
-        # est visible (voir tick_). Demarre en cadence repos. Le coeur reveille
-        # le main thread au changement d'etat (hook ci-dessous) pour que la
-        # pastille apparaisse immediatement malgre la cadence repos.
+        # ADAPTIVE-cadence timer: slow when idle, fast when the dot is visible
+        # (see tick_). Starts on the idle cadence. The core wakes the main thread
+        # on each state change (hook below) so the dot appears immediately despite
+        # the idle cadence.
         self._timer = None
         self._tick_interval = None
         self._schedule_timer(config.INDICATOR_TICK_IDLE_SECONDS)
         core.on_ui_state_change = self._wake_main
 
-        # Pre-vol : verifie la cle / la connexion au demarrage pour prevenir
-        # AVANT d'enregistrer 5 min pour rien (proxy TLS, cle refusee, reseau).
+        # Preflight: check the key / connection at startup to warn BEFORE
+        # recording 5 min for nothing (TLS proxy, rejected key, network).
         self._preflight_key_check()
 
     @objc.python_method
     def _preflight_key_check(self) -> None:
-        """Teste la cle en tache de fond ; notifie si elle echoue (proxy/cle/reseau).
+        """Test the key in the background; notify if it fails (proxy/key/network).
 
-        Ne bloque pas le lancement. Silencieux si tout va bien ou si aucune cle
-        n'est encore renseignee (l'onboarding s'en charge alors)."""
+        Does not block startup. Silent if all is well or if no key is entered yet
+        (the onboarding then handles it)."""
         if not credentials.has_api_key():
             return
 
         def _go() -> None:
             ok, msg = transcribe.test_api_key()
             if not ok:
-                # Draine par tick_ (main thread) en notification macOS.
+                # Drained by tick_ (main thread) into a macOS notification.
                 core.errors.put(msg)
 
         threading.Thread(target=_go, daemon=True).start()
 
-    # --- Premier lancement : installation dans /Applications ---
+    # --- First launch: install into /Applications ---
     @objc.python_method
     def _maybe_offer_move_to_applications(self) -> bool:
-        """Propose de deplacer l'app dans /Applications. True si un deplacement
-        a ete lance (l'app va se relancer ; l'appelant doit s'arreter)."""
+        """Offer to move the app into /Applications. True if a move was started
+        (the app is about to relaunch; the caller must stop)."""
         if not getattr(sys, "frozen", False):
-            return False  # mode dev (python app.py) : rien a faire
+            return False  # dev mode (python app.py): nothing to do
         bundle = NSBundle.mainBundle().bundlePath()
         if not bundle or not bundle.endswith(".app"):
             return False
@@ -256,16 +254,15 @@ class AppDelegate(NSObject):
         from AppKit import NSAlert
 
         alert = NSAlert.alloc().init()
-        alert.setMessageText_("Déplacer MistralSTT dans Applications ?")
+        alert.setMessageText_("Move MistralSTT to Applications?")
         alert.setInformativeText_(
-            "Pour un fonctionnement fiable (autorisations qui tiennent dans le "
-            "temps), MistralSTT doit vivre dans le dossier Applications. "
-            "Je peux l'y déplacer maintenant."
+            "For reliable operation (permissions that stick over time), MistralSTT "
+            "should live in the Applications folder. I can move it there now."
         )
-        alert.addButtonWithTitle_("Déplacer dans Applications")
-        alert.addButtonWithTitle_("Pas maintenant")
+        alert.addButtonWithTitle_("Move to Applications")
+        alert.addButtonWithTitle_("Not now")
         NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
-        if alert.runModal() != 1000:  # 1000 = premier bouton
+        if alert.runModal() != 1000:  # 1000 = first button
             return False
 
         dest = os.path.join("/Applications", os.path.basename(bundle))
@@ -276,56 +273,56 @@ class AppDelegate(NSObject):
                 shutil.move(bundle, dest)
         except Exception as exc:  # noqa: BLE001
             self._alert(
-                "Déplacement impossible",
-                f"Glisse MistralSTT dans Applications manuellement.\n\n{exc}",
+                "Move failed",
+                f"Drag MistralSTT into Applications manually.\n\n{exc}",
             )
             return False
 
-        # Relance la copie installee, puis quitte l'instance courante.
+        # Launch the installed copy, then quit the current instance.
         subprocess.Popen(["open", dest])
         NSApplication.sharedApplication().terminate_(self)
         return True
 
-    # --- Menu principal (raccourcis d'edition) ---
+    # --- Main menu (editing shortcuts) ---
     @objc.python_method
     def _install_main_menu(self) -> None:
         main = NSMenu.alloc().init()
 
-        # Menu applicatif (Quitter avec Cmd+Q).
+        # Application menu (Quit with Cmd+Q).
         app_item = NSMenuItem.alloc().init()
         main.addItem_(app_item)
         app_menu = NSMenu.alloc().init()
         app_menu.addItemWithTitle_action_keyEquivalent_(
-            "Quitter MistralSTT", b"terminate:", "q"
+            "Quit MistralSTT", b"terminate:", "q"
         )
         app_item.setSubmenu_(app_menu)
 
-        # Menu Edition : porte les selecteurs standard cut:/copy:/paste:/selectAll:
-        # avec leurs raccourcis. C'est ce qui rend Cmd+V fonctionnel.
+        # Edit menu: carries the standard cut:/copy:/paste:/selectAll: selectors
+        # with their shortcuts. This is what makes Cmd+V work.
         edit_item = NSMenuItem.alloc().init()
         main.addItem_(edit_item)
-        edit_menu = NSMenu.alloc().initWithTitle_("Édition")
-        edit_menu.addItemWithTitle_action_keyEquivalent_("Annuler", b"undo:", "z")
-        edit_menu.addItemWithTitle_action_keyEquivalent_("Rétablir", b"redo:", "Z")
+        edit_menu = NSMenu.alloc().initWithTitle_("Edit")
+        edit_menu.addItemWithTitle_action_keyEquivalent_("Undo", b"undo:", "z")
+        edit_menu.addItemWithTitle_action_keyEquivalent_("Redo", b"redo:", "Z")
         edit_menu.addItem_(NSMenuItem.separatorItem())
-        edit_menu.addItemWithTitle_action_keyEquivalent_("Couper", b"cut:", "x")
-        edit_menu.addItemWithTitle_action_keyEquivalent_("Copier", b"copy:", "c")
-        edit_menu.addItemWithTitle_action_keyEquivalent_("Coller", b"paste:", "v")
+        edit_menu.addItemWithTitle_action_keyEquivalent_("Cut", b"cut:", "x")
+        edit_menu.addItemWithTitle_action_keyEquivalent_("Copy", b"copy:", "c")
+        edit_menu.addItemWithTitle_action_keyEquivalent_("Paste", b"paste:", "v")
         edit_menu.addItemWithTitle_action_keyEquivalent_(
-            "Tout sélectionner", b"selectAll:", "a"
+            "Select All", b"selectAll:", "a"
         )
         edit_item.setSubmenu_(edit_menu)
 
         NSApplication.sharedApplication().setMainMenu_(main)
 
-    # --- Barre de menus ---
+    # --- Menu bar ---
     @objc.python_method
     def _build_status_item(self) -> None:
         bar = NSStatusBar.systemStatusBar()
         self._status_item = bar.statusItemWithLength_(NSVariableStatusItemLength)
         button = self._status_item.button()
-        # Icone monochrome SF Symbol (s'adapte au theme clair/sombre) plutot
-        # qu'un emoji. Repli sur un glyphe si le symbole est indisponible.
+        # Monochrome SF Symbol icon (adapts to the light/dark theme) rather than
+        # an emoji. Fall back to a glyph if the symbol is unavailable.
         img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
             "mic.fill", "MistralSTT"
         )
@@ -345,28 +342,31 @@ class AppDelegate(NSObject):
         menu.addItem_(NSMenuItem.separatorItem())
 
         menu.addItem_(
-            self._mk_item("Saisir la clé API…", b"enterApiKey:")
+            self._mk_item("Enter API key…", b"enterApiKey:")
         )
         self._login_item = self._mk_item(
-            "Lancer au démarrage", b"toggleLogin:"
+            "Launch at login", b"toggleLogin:"
         )
         menu.addItem_(self._login_item)
         menu.addItem_(self._mk_item("Permissions…", b"showOnboarding:"))
         menu.addItem_(
-            self._mk_item("Dictionnaire de vocabulaire…", b"openVocabulary:")
+            self._mk_item("Vocabulary dictionary…", b"openVocabulary:")
+        )
+        menu.addItem_(
+            self._mk_item("Recording limit…", b"setRecordLimit:")
         )
         menu.addItem_(NSMenuItem.separatorItem())
-        menu.addItem_(self._mk_item("Quitter", b"quitApp:"))
+        menu.addItem_(self._mk_item("Quit", b"quitApp:"))
 
-        # Delegue : l'etat du menu (permissions, login) n'est recalcule QUE quand
-        # l'utilisateur ouvre le menu (menuNeedsUpdate:), plus a chaque tick.
-        # Cela sort les appels systeme couteux (AXIsProcessTrusted,
-        # CGPreflightListenEventAccess, SMAppService.status) du chemin 10 Hz.
+        # Delegate: the menu state (permissions, login) is recomputed ONLY when
+        # the user opens the menu (menuNeedsUpdate:), no longer on every tick.
+        # This keeps the costly system calls (AXIsProcessTrusted,
+        # CGPreflightListenEventAccess, SMAppService.status) off the 10 Hz path.
         menu.setDelegate_(self)
         self._status_item.setMenu_(menu)
         self._refresh_menu()
 
-    # NSMenuDelegate : recalcule l'etat juste avant l'affichage du menu.
+    # NSMenuDelegate: recompute the state just before the menu is displayed.
     def menuNeedsUpdate_(self, menu):  # noqa: N802, ARG002
         self._refresh_menu()
 
@@ -383,17 +383,17 @@ class AppDelegate(NSObject):
     @objc.python_method
     def _refresh_menu(self) -> None:
         if self._all_permissions_ok() and core._tap is not None:
-            self._state_item.setTitle_("MistralSTT — prêt (⌥ droite)")
+            self._state_item.setTitle_("MistralSTT — ready (right ⌥)")
         else:
-            self._state_item.setTitle_("MistralSTT — permissions requises")
+            self._state_item.setTitle_("MistralSTT — permissions required")
         self._login_item.setState_(
             NSControlStateValueOn if login_enabled() else NSControlStateValueOff
         )
 
-    # --- Timer principal ---
+    # --- Main timer ---
     @objc.python_method
     def _schedule_timer(self, interval: float) -> None:
-        """(Re)programme le timer principal a `interval` secondes."""
+        """(Re)schedule the main timer at `interval` seconds."""
         from AppKit import NSTimer
 
         if self._timer is not None:
@@ -405,11 +405,11 @@ class AppDelegate(NSObject):
 
     @objc.python_method
     def _wake_main(self) -> None:
-        """Reveille le main thread pour un rendu immediat de la pastille.
+        """Wake the main thread for an immediate render of the dot.
 
-        Appele par le coeur (core.on_ui_state_change) depuis le thread du tap ou
-        du worker, a chaque changement d'etat UI. On planifie un tick sur le main
-        thread (en common modes, pour passer meme pendant un suivi de menu)."""
+        Called by the core (core.on_ui_state_change) from the tap or worker
+        thread, on every UI state change. We schedule a tick on the main thread
+        (in common modes, so it passes even during a menu tracking loop)."""
         from Foundation import NSRunLoopCommonModes
 
         self.performSelectorOnMainThread_withObject_waitUntilDone_modes_(
@@ -417,66 +417,69 @@ class AppDelegate(NSObject):
         )
 
     def tick_(self, timer):  # noqa: N802, ARG002
-        # (Re)arme le tap des que la Surveillance des entrees est accordee.
-        # Court-circuit : une fois le tap en place, has_input_monitoring() (appel
-        # systeme) n'est plus jamais evalue.
+        # (Re)arm the tap as soon as Input Monitoring is granted. Short-circuit:
+        # once the tap is in place, has_input_monitoring() (a system call) is
+        # never evaluated again.
         if core._tap is None and has_input_monitoring():
             core.install_event_tap()
 
-        # Pastille : on rend uniquement au changement d'etat.
+        # "Long take" reminder (never cuts off the in-progress take).
+        core.maybe_warn_long_recording()
+
+        # Dot: we render only on a state change.
         if self._indicator is not None:
             s = core._ui_state
             if s != self._last_rendered:
                 self._indicator.render(s)
                 self._last_rendered = s
-            # Ré-affirme le premier plan (survit aux passages plein ecran).
+            # Re-assert the front (survives full-screen transitions).
             self._indicator.tick()
 
-        # Erreurs du worker -> notification macOS.
+        # Worker errors -> macOS notification.
         try:
             while True:
                 _notify(core.errors.get_nowait())
         except queue.Empty:
             pass
 
-        # Notifications POSITIVES (ex: transcription differee recuperee).
+        # POSITIVE notifications (e.g. a deferred transcription recovered).
         try:
             while True:
                 _notify(core.notices.get_nowait())
         except queue.Empty:
             pass
 
-        # Onboarding ouvert : on rafraichit son etat (fenetre de config, breve).
+        # Onboarding open: refresh its state (the setup window, briefly).
         if self._onboarding is not None:
             self._update_onboarding_status()
-            # Resultat du "Tester la clé" (calcule dans un thread reseau).
+            # Result of "Test the key" (computed in a network thread).
             result = getattr(self, "_keytest_result", None)
             if result is not None:
                 self._ob_keytest.setStringValue_(result)
                 self._keytest_result = None
 
-        # Cadence adaptative : rapide pendant enregistrement/transcription (la
-        # pastille est reaffirmee au premier plan souvent), lente sinon. NB:
-        # les etats "cancelled" et "recovered" restent colles apres leur flash
-        # (l'animation se termine seule via Core Animation), donc on ne les compte
-        # PAS comme actifs, sinon on resterait en cadence rapide a vie. "retrying"
-        # (attente reseau) peut durer longtemps : on le laisse aussi en cadence
-        # REPOS (0,75 s suffit a reaffirmer le premier plan ; evite un 10 Hz
-        # permanent). Le menu se rafraichit a son ouverture (menuNeedsUpdate:).
+        # Adaptive cadence: fast during recording/transcription (the dot is
+        # re-asserted to the front often), slow otherwise. NB: the "cancelled" and
+        # "recovered" states stay stuck after their flash (the animation ends on
+        # its own via Core Animation), so we do NOT count them as active, or we
+        # would stay on the fast cadence forever. "retrying" (network wait) can
+        # last a long time: we leave it on the IDLE cadence too (0.75 s is enough
+        # to re-assert the front; avoids a permanent 10 Hz). The menu refreshes
+        # when it opens (menuNeedsUpdate:).
         desired = (
             config.INDICATOR_TICK_SECONDS
-            if core._ui_state in ("recording", "transcribing")
+            if core._ui_state in ("recording", "recording_long", "transcribing")
             else config.INDICATOR_TICK_IDLE_SECONDS
         )
         if desired != self._tick_interval:
             self._schedule_timer(desired)
 
-    # --- Actions du menu ---
+    # --- Menu actions ---
     def enterApiKey_(self, sender):  # noqa: N802, ARG002
         current = credentials.get_api_key() or ""
         value = self._prompt_secret(
-            "Clé API Mistral",
-            "Colle ta clé API Mistral (console.mistral.ai).",
+            "Mistral API key",
+            "Paste your Mistral API key (console.mistral.ai).",
             current,
         )
         if value is not None and value.strip():
@@ -485,32 +488,55 @@ class AppDelegate(NSObject):
             self._preflight_key_check()
 
     def openVocabulary_(self, sender):  # noqa: N802, ARG002
-        """Ouvre le dictionnaire de vocabulaire (context_bias) dans l'editeur.
+        """Open the vocabulary dictionary (context_bias) in the editor.
 
-        Le cree avec un en-tete d'aide s'il n'existe pas encore. Une entree par
-        ligne ; ces termes biaisent la transcription (aucune requete/credit en
-        plus, aucun resume)."""
+        Creates it with a help header if it does not exist yet. One entry per
+        line; these terms bias the transcription (no extra request/credit, no
+        summarization)."""
         try:
             path = transcribe.ensure_vocab_file()
             subprocess.Popen(["open", "-t", path])
-            # Avertit si des lignes sont ignorees (espace/virgule -> invalides pour
-            # l'API) : elles n'influencent pas la transcription, l'utilisateur doit
-            # les decouper en mots. Non bloquant (notification).
+            # Warn if some lines are ignored (space/comma -> invalid for the API):
+            # they do not influence the transcription, the user must split them
+            # into words. Non-blocking (notification).
             ignored = transcribe.ignored_bias_terms()
             if ignored:
                 sample = ", ".join(ignored[:3])
                 more = "…" if len(ignored) > 3 else ""
                 _notify(
-                    f"{len(ignored)} terme(s) ignoré(s) (espace/virgule) : "
-                    f"{sample}{more}. Un seul mot par ligne."
+                    f"{len(ignored)} term(s) ignored (space/comma): "
+                    f"{sample}{more}. One word per line."
                 )
         except Exception as exc:  # noqa: BLE001
-            self._alert("Dictionnaire indisponible", str(exc))
+            self._alert("Dictionary unavailable", str(exc))
+
+    def setRecordLimit_(self, sender):  # noqa: N802, ARG002
+        """Adjust the recording limit (minutes). The only place a long take is cut.
+
+        Default is low for RAM; can be raised up to the Voxtral API ceiling
+        (60 min). The warning still fires ~1.5 min before whatever the limit is."""
+        current = settings.get_max_record_minutes()
+        value = self._prompt_text(
+            "Recording limit",
+            f"Maximum length of a single take, in minutes (1–"
+            f"{config.MAX_RECORD_CEILING_MINUTES}). Longer takes use more RAM; "
+            f"audio past the limit isn't captured. Currently {current} min.",
+            str(current),
+        )
+        if value is None:
+            return
+        try:
+            minutes = int(value.strip())
+        except (TypeError, ValueError):
+            self._alert("Recording limit", "Please enter a whole number of minutes.")
+            return
+        stored = settings.set_max_record_minutes(minutes)
+        _notify(f"Recording limit set to {stored} min (applies to the next take).")
 
     def toggleLogin_(self, sender):  # noqa: N802, ARG002
         ok, msg = set_login_enabled(not login_enabled())
         if not ok:
-            self._alert("Lancer au démarrage", msg or "Échec.")
+            self._alert("Launch at login", msg or "Failed.")
         self._refresh_menu()
 
     def quitApp_(self, sender):  # noqa: N802, ARG002
@@ -520,7 +546,7 @@ class AppDelegate(NSObject):
             pass
         NSApplication.sharedApplication().terminate_(self)
 
-    # --- Onboarding (fenetre simple) ---
+    # --- Onboarding (a simple window) ---
     def showOnboarding_(self, sender):  # noqa: N802, ARG002
         if self._onboarding is not None:
             self._onboarding.makeKeyAndOrderFront_(None)
@@ -534,16 +560,16 @@ class AppDelegate(NSObject):
             NSBackingStoreBuffered,
             False,
         )
-        win.setTitle_("MistralSTT — Configuration")
-        # Fenetre NORMALE (pas "toujours au-dessus") : elle s'affiche sur le
-        # bureau plutot qu'en surimpression d'une app en plein ecran.
-        # Sinon la fenetre est liberee a la fermeture (bouton rouge) -> la
-        # reference pendante ferait planter une reouverture via le menu.
+        win.setTitle_("MistralSTT — Setup")
+        # NORMAL window (not "always on top"): it shows on the desktop rather than
+        # overlaid on a full-screen app. And it is not released on close (red
+        # button) -> the dangling reference would otherwise crash a reopen from
+        # the menu.
         win.setReleasedWhenClosed_(False)
         win.setDelegate_(self)
-        # Centre sur l'ecran ou se trouve le curseur (la ou l'utilisateur
-        # travaille), pas sur l'ecran principal : evite de s'ouvrir par-dessus
-        # une autre app sur un autre moniteur.
+        # Center on the screen that holds the cursor (where the user works), not
+        # the main screen: avoids opening on top of another app on another
+        # monitor.
         self._center_on_active_screen(win, w, h)
         content = win.contentView()
 
@@ -566,56 +592,56 @@ class AppDelegate(NSObject):
             content.addSubview_(b)
             return b
 
-        label("Bienvenue dans MistralSTT", 20, h - 36, w - 40, 22, bold=True)
+        label("Welcome to MistralSTT", 20, h - 36, w - 40, 22, bold=True)
 
-        # Rappel des commandes : l'utilisateur ne les voit nulle part ailleurs.
-        label("Commandes :", 20, h - 62, w - 40, 18, bold=True)
+        # Reminder of the commands: the user sees them nowhere else.
+        label("Commands:", 20, h - 62, w - 40, 18, bold=True)
         label(
-            "• Maintiens ⌥ Option droite, parle, relâche : le texte s'insère.",
+            "• Hold ⌥ Right Option, speak, release: the text is inserted.",
             20, h - 82, w - 40, 18,
         )
         label(
-            "• ⌥ Option droite + Espace : écoute mains-libres (⌥ pour arrêter).",
+            "• ⌥ Right Option + Space: hands-free listening (⌥ to stop).",
             20, h - 102, w - 40, 18,
         )
         label(
-            "• Échap : annule l'enregistrement en cours.",
+            "• Esc: cancels the current recording.",
             20, h - 122, w - 40, 18,
         )
 
-        # Cle API
-        label("1. Clé API Mistral", 20, h - 160, 200, 18)
+        # API key
+        label("1. Mistral API key", 20, h - 160, 200, 18)
         self._ob_key = NSSecureTextField.alloc().initWithFrame_(
             NSMakeRect(20, h - 190, 300, 24)
         )
         self._ob_key.setStringValue_(credentials.get_api_key() or "")
         content.addSubview_(self._ob_key)
-        button("Enregistrer", 330, h - 192, 110, b"saveKeyFromOnboarding:")
-        button("Tester la clé", 20, h - 228, 140, b"testKey:")
+        button("Save", 330, h - 192, 110, b"saveKeyFromOnboarding:")
+        button("Test the key", 20, h - 228, 140, b"testKey:")
         self._ob_keytest = label("", 170, h - 224, 270, 18)
 
         # Permissions
-        label("2. Autorisations macOS (clique, coche, reviens ici)", 20, h - 268, w - 40, 18)
+        label("2. macOS permissions (click, toggle on, come back here)", 20, h - 268, w - 40, 18)
 
-        self._ob_mic = label("• Micro : —", 20, h - 296, 230, 18)
-        button("Autoriser", 250, h - 298, 190, b"reqMic:")
+        self._ob_mic = label("• Microphone: —", 20, h - 296, 230, 18)
+        button("Allow", 250, h - 298, 190, b"reqMic:")
 
-        self._ob_input = label("• Surveillance des entrées : —", 20, h - 328, 230, 18)
-        button("Autoriser", 250, h - 330, 190, b"reqInput:")
+        self._ob_input = label("• Input Monitoring: —", 20, h - 328, 230, 18)
+        button("Allow", 250, h - 330, 190, b"reqInput:")
 
-        self._ob_ax = label("• Accessibilité : —", 20, h - 360, 230, 18)
-        button("Autoriser", 250, h - 362, 190, b"reqAx:")
+        self._ob_ax = label("• Accessibility: —", 20, h - 360, 230, 18)
+        button("Allow", 250, h - 362, 190, b"reqAx:")
 
-        # Demarrage automatique (case a cocher).
-        label("3. Démarrage", 20, h - 396, 200, 18)
+        # Launch at login (checkbox).
+        label("3. Startup", 20, h - 396, 200, 18)
         self._ob_login = NSButton.alloc().initWithFrame_(NSMakeRect(20, 54, 300, 22))
         self._ob_login.setButtonType_(NSButtonTypeSwitch)
-        self._ob_login.setTitle_("Lancer à l'ouverture de session")
+        self._ob_login.setTitle_("Launch at login")
         self._ob_login.setTarget_(self)
         self._ob_login.setAction_(b"toggleLoginFromOnboarding:")
         content.addSubview_(self._ob_login)
 
-        button("Terminé", w - 130, 18, 110, b"closeOnboarding:")
+        button("Done", w - 130, 18, 110, b"closeOnboarding:")
 
         self._onboarding = win
         self._update_onboarding_status()
@@ -624,12 +650,12 @@ class AppDelegate(NSObject):
 
     @objc.python_method
     def _center_on_active_screen(self, win, w: int, h: int) -> None:
-        """Place la fenetre, centree, sur l'ecran qui contient le curseur.
+        """Place the window, centered, on the screen that holds the cursor.
 
-        `NSWindow.center()` vise l'ecran principal (celui de la barre de menus) ;
-        sur un setup multi-ecrans la fenetre s'ouvrait alors loin de l'utilisateur
-        (ex: par-dessus le navigateur d'un autre moniteur). On choisit plutot
-        l'ecran ou se trouve la souris, et on se rabat sur l'ecran principal."""
+        `NSWindow.center()` targets the main screen (the menu-bar one); on a
+        multi-screen setup the window then opened far from the user (e.g. over the
+        browser on another monitor). We pick the screen where the mouse is, and
+        fall back to the main screen."""
         from AppKit import NSEvent, NSMakePoint, NSScreen
 
         mouse = NSEvent.mouseLocation()
@@ -655,16 +681,16 @@ class AppDelegate(NSObject):
         def mark(ok):
             return "✅" if ok else "❌"
 
-        # Le micro n'a pas d'API de check simple sans AVFoundation : on indique
-        # juste l'action.
-        self._ob_mic.setStringValue_("• Micro : (clique pour autoriser)")
+        # The mic has no simple check API without AVFoundation: we just state the
+        # action.
+        self._ob_mic.setStringValue_("• Microphone: (click to allow)")
         self._ob_input.setStringValue_(
-            f"• Surveillance des entrées : {mark(has_input_monitoring())}"
+            f"• Input Monitoring: {mark(has_input_monitoring())}"
         )
         self._ob_ax.setStringValue_(
-            f"• Accessibilité : {mark(has_accessibility())}"
+            f"• Accessibility: {mark(has_accessibility())}"
         )
-        # Reflete l'etat reel du lancement au login (peut avoir change via le menu).
+        # Reflect the real launch-at-login state (may have changed via the menu).
         self._ob_login.setState_(
             NSControlStateValueOn if login_enabled() else NSControlStateValueOff
         )
@@ -677,17 +703,17 @@ class AppDelegate(NSObject):
             self._preflight_key_check()
 
     def testKey_(self, sender):  # noqa: N802, ARG002
-        # Enregistre d'abord ce qui est tape, puis teste en tache de fond (reseau).
+        # Save what is typed first, then test in the background (network).
         value = self._ob_key.stringValue()
         if value and value.strip():
             credentials.set_api_key(value.strip())
             transcribe.reset_client()
-        self._ob_keytest.setStringValue_("Test en cours…")
+        self._ob_keytest.setStringValue_("Testing…")
         self._keytest_result = None
 
         def _go() -> None:
             ok, msg = transcribe.test_api_key()
-            # Lu par tick_ (main thread) pour mettre a jour le label sans risque.
+            # Read by tick_ (main thread) to update the label safely.
             self._keytest_result = msg
 
         threading.Thread(target=_go, daemon=True).start()
@@ -696,11 +722,11 @@ class AppDelegate(NSObject):
         want = sender.state() == NSControlStateValueOn
         ok, msg = set_login_enabled(want)
         if not ok:
-            # Remet la case dans l'etat reel et explique.
+            # Put the checkbox back to the real state and explain.
             sender.setState_(
                 NSControlStateValueOn if login_enabled() else NSControlStateValueOff
             )
-            self._alert("Lancer au démarrage", msg or "Échec.")
+            self._alert("Launch at login", msg or "Failed.")
         self._refresh_menu()
 
     def reqMic_(self, sender):  # noqa: N802, ARG002
@@ -723,7 +749,7 @@ class AppDelegate(NSObject):
     def windowWillClose_(self, notification):  # noqa: N802, ARG002
         self._onboarding = None
 
-    # --- Petites boites de dialogue ---
+    # --- Small dialog boxes ---
     @objc.python_method
     def _prompt_secret(self, title: str, message: str, default: str):
         from AppKit import NSAlert
@@ -732,8 +758,26 @@ class AppDelegate(NSObject):
         alert.setMessageText_(title)
         alert.setInformativeText_(message)
         alert.addButtonWithTitle_("OK")
-        alert.addButtonWithTitle_("Annuler")
+        alert.addButtonWithTitle_("Cancel")
         field = NSSecureTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 300, 24))
+        field.setStringValue_(default)
+        alert.setAccessoryView_(field)
+        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+        resp = alert.runModal()
+        if resp == 1000:  # NSAlertFirstButtonReturn
+            return field.stringValue()
+        return None
+
+    @objc.python_method
+    def _prompt_text(self, title: str, message: str, default: str):
+        from AppKit import NSAlert
+
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_(title)
+        alert.setInformativeText_(message)
+        alert.addButtonWithTitle_("OK")
+        alert.addButtonWithTitle_("Cancel")
+        field = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 300, 24))
         field.setStringValue_(default)
         alert.setAccessoryView_(field)
         NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
@@ -760,7 +804,3 @@ def main() -> None:
     delegate = AppDelegate.alloc().init()
     app.setDelegate_(delegate)
     app.run()
-
-
-if __name__ == "__main__":
-    main()

@@ -1,14 +1,14 @@
-"""Stockage de la cle API hors du dossier projet.
+"""Store the API key outside the project folder.
 
-Une .app packagee n'a pas de `.env` a cote du code : on range donc la cle dans
-`~/Library/Application Support/MistralSTT/.env`, ecrit/lu par l'onboarding.
+A packaged .app has no `.env` next to the code, so the key is stored in
+`~/Library/Application Support/MistralSTT/.env`, written/read by the onboarding.
 
-Ordre de resolution de la cle (cf. `get_api_key`) :
-  1. variable d'environnement MISTRAL_API_KEY (pratique en dev / via launchd) ;
-  2. fichier Application Support (le cas normal pour la .app).
+Key resolution order (see `get_api_key`):
+  1. the MISTRAL_API_KEY environment variable (handy in dev / via launchd);
+  2. the Application Support file (the normal case for the .app).
 
-Le format reste `MISTRAL_API_KEY=...` pour rester compatible avec un `.env`
-classique et le `python-dotenv` deja utilise en mode dev.
+The format stays `MISTRAL_API_KEY=...` to remain compatible with a classic
+`.env` and the `python-dotenv` already used in dev mode.
 """
 
 import os
@@ -21,7 +21,7 @@ _KEY_NAME = "MISTRAL_API_KEY"
 
 
 def _read_key_file() -> str | None:
-    """Renvoie la cle stockee dans le fichier Application Support, ou None."""
+    """Return the key stored in the Application Support file, or None."""
     try:
         with open(KEY_FILE, encoding="utf-8") as f:
             for line in f:
@@ -37,7 +37,7 @@ def _read_key_file() -> str | None:
 
 
 def get_api_key() -> str | None:
-    """Cle API effective : env d'abord (dev/launchd), puis fichier app."""
+    """Effective API key: env first (dev/launchd), then the app file."""
     env = os.environ.get(_KEY_NAME)
     if env:
         return env.strip()
@@ -45,9 +45,9 @@ def get_api_key() -> str | None:
 
 
 def set_api_key(key: str) -> None:
-    """Ecrit la cle dans le fichier Application Support (cree le dossier).
+    """Write the key into the Application Support file (creates the folder).
 
-    Le fichier est restreint a l'utilisateur (chmod 600) : il contient un secret.
+    The file is restricted to the user (chmod 600): it holds a secret.
     """
     key = (key or "").strip()
     os.makedirs(APP_SUPPORT_DIR, exist_ok=True)
@@ -60,5 +60,5 @@ def set_api_key(key: str) -> None:
 
 
 def has_api_key() -> bool:
-    """Vrai si une cle non vide est disponible (env ou fichier)."""
+    """True if a non-empty key is available (env or file)."""
     return bool(get_api_key())

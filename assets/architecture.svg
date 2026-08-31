@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 420" width="960" height="420" font-family="-apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif" role="img" aria-label="MistralSpeechToText architecture: key press, microphone capture, WAV, persistent retry queue, Mistral Voxtral API, paste at cursor">
+  <!-- Self-contained light panel so it reads on both light and dark READMEs -->
+  <rect x="0" y="0" width="960" height="420" rx="18" fill="#f7f8fa"/>
+  <rect x="0.5" y="0.5" width="959" height="419" rx="18" fill="none" stroke="#e2e5ea"/>
+
+  <text x="32" y="46" font-size="22" font-weight="700" fill="#1c2330">MistralSpeechToText — how it works</text>
+  <text x="32" y="70" font-size="14" fill="#5b6472">Hold Right Option ⌥ · speak · release — the text is typed at your cursor, in any app.</text>
+
+  <!-- Arrow marker -->
+  <defs>
+    <marker id="arw" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8a93a3"/>
+    </marker>
+  </defs>
+
+  <!-- Node style: rounded card + title + subtitle -->
+  <!-- 1. Key -->
+  <rect x="32" y="120" width="150" height="86" rx="12" fill="#eef1ff" stroke="#c7cffb"/>
+  <text x="107" y="152" text-anchor="middle" font-size="15" font-weight="700" fill="#2a2f6b">Right Option ⌥</text>
+  <text x="107" y="174" text-anchor="middle" font-size="12" fill="#5b6472">global key tap</text>
+  <text x="107" y="190" text-anchor="middle" font-size="12" fill="#5b6472">mistral_stt.py</text>
+
+  <!-- 2. Mic -->
+  <rect x="212" y="120" width="150" height="86" rx="12" fill="#eafaf1" stroke="#bfe8d1"/>
+  <text x="287" y="152" text-anchor="middle" font-size="15" font-weight="700" fill="#1f6a44">Microphone</text>
+  <text x="287" y="174" text-anchor="middle" font-size="12" fill="#5b6472">16 kHz mono → WAV</text>
+  <text x="287" y="190" text-anchor="middle" font-size="12" fill="#5b6472">audio.py</text>
+
+  <!-- 3. Queue -->
+  <rect x="392" y="120" width="164" height="86" rx="12" fill="#fff5e6" stroke="#f4dcae"/>
+  <text x="474" y="152" text-anchor="middle" font-size="15" font-weight="700" fill="#8a5a10">Persistent queue</text>
+  <text x="474" y="174" text-anchor="middle" font-size="12" fill="#5b6472">on-disk, auto-resume</text>
+  <text x="474" y="190" text-anchor="middle" font-size="12" fill="#5b6472">transcribe_queue.py</text>
+
+  <!-- 4. API -->
+  <rect x="586" y="120" width="164" height="86" rx="12" fill="#fdeef0" stroke="#f6c9cf"/>
+  <text x="668" y="152" text-anchor="middle" font-size="15" font-weight="700" fill="#9c2b3a">Mistral Voxtral</text>
+  <text x="668" y="174" text-anchor="middle" font-size="12" fill="#5b6472">/audio/transcriptions</text>
+  <text x="668" y="190" text-anchor="middle" font-size="12" fill="#5b6472">transcribe.py</text>
+
+  <!-- 5. Paste -->
+  <rect x="780" y="120" width="148" height="86" rx="12" fill="#eef1ff" stroke="#c7cffb"/>
+  <text x="854" y="152" text-anchor="middle" font-size="15" font-weight="700" fill="#2a2f6b">Paste at cursor</text>
+  <text x="854" y="174" text-anchor="middle" font-size="12" fill="#5b6472">any focused app</text>
+  <text x="854" y="190" text-anchor="middle" font-size="12" fill="#5b6472">inserter.py</text>
+
+  <!-- Flow arrows -->
+  <line x1="182" y1="163" x2="210" y2="163" stroke="#8a93a3" stroke-width="2" marker-end="url(#arw)"/>
+  <line x1="362" y1="163" x2="390" y2="163" stroke="#8a93a3" stroke-width="2" marker-end="url(#arw)"/>
+  <line x1="556" y1="163" x2="584" y2="163" stroke="#8a93a3" stroke-width="2" marker-end="url(#arw)"/>
+  <line x1="750" y1="163" x2="778" y2="163" stroke="#8a93a3" stroke-width="2" marker-end="url(#arw)"/>
+
+  <!-- Resilience loop: API back to queue on failure -->
+  <path d="M668,206 C668,250 474,250 474,208" fill="none" stroke="#c9a24b" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#arw)"/>
+  <text x="571" y="268" text-anchor="middle" font-size="12" fill="#8a5a10">on network failure → retry with back-off (audio never lost)</text>
+
+  <!-- Bottom band: cross-cutting concerns -->
+  <rect x="32" y="312" width="433" height="76" rx="12" fill="#ffffff" stroke="#e2e5ea"/>
+  <text x="52" y="340" font-size="14" font-weight="700" fill="#1c2330">Floating dot indicator</text>
+  <text x="52" y="362" font-size="12" fill="#5b6472">follows the cursor · red = recording · pulsing = long take</text>
+  <text x="52" y="378" font-size="12" fill="#5b6472">amber = transcribing · blue = waiting to retry · indicator.py</text>
+
+  <rect x="495" y="312" width="433" height="76" rx="12" fill="#ffffff" stroke="#e2e5ea"/>
+  <text x="515" y="340" font-size="14" font-weight="700" fill="#1c2330">Local &amp; private</text>
+  <text x="515" y="362" font-size="12" fill="#5b6472">key stored 0600 in Application Support · corporate TLS</text>
+  <text x="515" y="378" font-size="12" fill="#5b6472">proxy aware (Keychain trust) · history kept locally · credentials.py</text>
+</svg>

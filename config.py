@@ -1,114 +1,137 @@
-"""Constantes partagees de MistralSpeechToText.
+"""Shared constants for MistralSpeechToText.
 
-La touche de declenchement est isolee ici pour pouvoir la rebasculer
-facilement (Option droite par defaut ; replis possibles plus bas).
+The trigger key is isolated here so it can be swapped easily (Right Option by
+default; fallbacks are listed below).
 """
 
 import os
 
-# --- Touche de declenchement ---------------------------------------------
-# Keycodes macOS (virtual key codes) des modificateurs gauche/droite.
-#   58 = Option gauche   61 = Option droite
-#   59 = Control gauche  62 = Control droit
-#   56 = Shift gauche    60 = Shift droit
-# On declenche sur l'Option DROITE : l'Option gauche reste libre pour les
-# accents (e, e, c...).
-TRIGGER_KEYCODE = 61  # Option droite
+# --- Trigger key ----------------------------------------------------------
+# macOS keycodes (virtual key codes) of the left/right modifiers.
+#   58 = Left Option   61 = Right Option
+#   59 = Left Control  62 = Right Control
+#   56 = Left Shift    60 = Right Shift
+# We trigger on the RIGHT Option: the Left Option stays free for accents
+# (e, e, c...).
+TRIGGER_KEYCODE = 61  # Right Option
 
-# Masque de flag associe a la famille Option (kCGEventFlagMaskAlternate).
-# Sert a distinguer un appui (down) d'un relachement (up) sur flagsChanged.
+# Flag mask for the Option family (kCGEventFlagMaskAlternate).
+# Used to tell a press (down) from a release (up) on flagsChanged.
 TRIGGER_FLAG_MASK = 0x00080000  # NSEventModifierFlagOption
 
-# Si tu veux rebasculer sur Control droit :
+# If you want to switch to Right Control:
 #   TRIGGER_KEYCODE = 62
 #   TRIGGER_FLAG_MASK = 0x00040000  # kCGEventFlagMaskControl
 
-# Touche espace (pour basculer en ecoute continue pendant le maintien).
+# Space key (to switch to continuous listening while held).
 SPACE_KEYCODE = 49
 
-# Touche Echap : annule l'enregistrement en cours (jette la prise, pas de
-# transcription ni de collage).
+# Escape key: cancels the in-progress recording (drops the take, no
+# transcription or paste).
 ESCAPE_KEYCODE = 53
 
 # --- Audio ----------------------------------------------------------------
-SAMPLE_RATE = 16000  # 16 kHz, suffisant et leger pour la STT
+SAMPLE_RATE = 16000  # 16 kHz, enough and light for STT
 CHANNELS = 1
-# Duree max d'une prise (garde-fou memoire pour l'ecoute continue mains-libres :
-# sinon le buffer croit sans borne). Au-dela, on cesse d'accumuler ; le debut
-# est conserve et transcrit normalement. 10 min ~ 19 Mo en 16 kHz mono int16.
-MAX_RECORD_SECONDS = 600
+# Max duration of a take. This is the ONLY place a long take is actually cut:
+# past it we stop accumulating audio (the start is still transcribed) so the
+# buffer cannot grow unbounded on a forgotten hands-free listen. It is USER
+# CONFIGURABLE (menu > "Recording limit…", persisted per user): the default is
+# kept low for RAM, but the user can raise it up to the API ceiling.
+#   - default 10 min ~ 18 MB of RAM at 16 kHz mono int16;
+#   - ceiling 60 min ~ 110 MB — the real Mistral Voxtral limit (60 min / 500 MB).
+# The effective value is read via settings.get_max_record_seconds().
+MAX_RECORD_DEFAULT_MINUTES = 10
+MAX_RECORD_CEILING_MINUTES = 60  # hard cap: the Voxtral transcription API's limit
 
 # --- Transcription --------------------------------------------------------
 MISTRAL_MODEL = "voxtral-mini-latest"
-# On NE fixe PAS la langue : auto-detection du franglais (melange FR/EN).
+# We do NOT set a language: auto-detect mixed FR/EN ("franglais").
 MISTRAL_LANGUAGE = None
 
-# --- Reseau / timeouts HTTP ----------------------------------------------
-# Sans timeout explicite, un changement/perte de reseau laisse la requete
-# SUSPENDUE indefiniment : le thread de transcription reste bloque et la
-# pastille se fige. On borne donc l'appel.
-#   - CONNECT court : un reseau mort echoue vite -> on bascule en reprise ;
-#   - READ genereux : couvre l'upload + la transcription d'un audio long.
-HTTP_CONNECT_TIMEOUT = 10.0   # secondes
-HTTP_READ_TIMEOUT = 180.0     # secondes
+# --- Network / HTTP timeouts ---------------------------------------------
+# Without an explicit timeout, a network change/loss leaves the request HANGING
+# indefinitely: the transcription thread stays blocked and the dot freezes. So
+# we bound the call.
+#   - short CONNECT: a dead network fails fast -> we switch to retry;
+#   - generous READ: covers the upload + transcription of a long audio.
+HTTP_CONNECT_TIMEOUT = 10.0   # seconds
+HTTP_READ_TIMEOUT = 180.0     # seconds
 
-# --- Reprise (file persistante) ------------------------------------------
-# Quand une transcription echoue (reseau), le WAV n'est PAS jete : il est
-# conserve et re-tente en tache de fond selon ce backoff (secondes ; la
-# derniere valeur est repetee ensuite), jusqu'a reussite. Ainsi un vocal
-# long n'est jamais perdu, meme apres un redemarrage de l'app.
+# --- Retry (persistent queue) --------------------------------------------
+# When a transcription fails (network), the WAV is NOT dropped: it is kept and
+# retried in the background on this back-off (seconds; the last value is then
+# repeated), until success. So a long take is never lost, even after an app
+# restart.
 RETRY_BACKOFF_SECONDS = [2, 5, 15, 30, 60, 120, 300]
-# Plafond de tentatives TRANSITOIRES : au-dela, on abandonne meme sur du reseau
-# (garde-fou anti-boucle, en plus de l'age max). Une erreur PERMANENTE (400/401
-# /422...) est, elle, abandonnee des la 1re tentative (cf. transcribe_queue).
+# Cap on TRANSIENT attempts: past it we give up even on network (anti-loop
+# guard-rail, on top of max age). A PERMANENT error (400/401/422...) is given up
+# on the very first attempt (see transcribe_queue).
 RETRY_MAX_ATTEMPTS = 12
-# Au-dela de cet age, un job en attente est purge (garde-fou anti-accumulation).
-PENDING_MAX_AGE_SECONDS = 7 * 24 * 3600  # 7 jours
+# Past this age, a pending job is purged (anti-accumulation guard-rail).
+PENDING_MAX_AGE_SECONDS = 7 * 24 * 3600  # 7 days
 
 # --- Feedback -------------------------------------------------------------
-# Sons systeme macOS joues aux transitions (None pour desactiver).
+# macOS system sounds played on transitions (None to disable).
 SOUND_START = "/System/Library/Sounds/Tink.aiff"
 SOUND_DONE = "/System/Library/Sounds/Pop.aiff"
+# Sound played ONCE as a take nears the recording limit (a "wrap up" reminder).
+# Distinct from the other two. None to disable.
+SOUND_WARN = "/System/Library/Sounds/Sosumi.aiff"
 
-# --- Indicateur visuel ----------------------------------------------------
-# Petite pastille flottante (NSPanel) en bas-centre de l'ecran :
-#   rouge = enregistrement, ambre = transcription en cours, masquee = repos.
+# --- "Approaching the limit" warning --------------------------------------
+# The warning is NOT an arbitrary duration: it is anchored to the real cut-off
+# point (the recording limit above). This many seconds BEFORE that limit, the dot
+# switches to "warn" mode (distinct color + pulse) and a sound plays ONCE. The
+# recording CONTINUES normally; it is just a heads-up to wrap up before audio
+# starts being dropped. Not user-tunable (the limit is what the user adjusts).
+RECORD_WARN_LEAD_SECONDS = 90
+
+# --- Visual indicator -----------------------------------------------------
+# Small floating dot (NSPanel) at the bottom center of the screen:
+#   red = recording, amber = transcription in progress, hidden = idle.
 INDICATOR_ENABLED = True
-# Deux cadences pour la boucle main-thread qui pilote l'UI (et rend la main au
-# Ctrl+C en CLI) :
-#   - RAPIDE quand la pastille est VISIBLE (enregistrement/transcription) : elle
-#     est reaffirmee au premier plan souvent, donc reste au-dessus meme si une
-#     app passe en plein ecran ;
-#   - REPOS (idle) : bien plus lent, car il n'y a alors quasiment rien a faire.
-#     On evite ainsi 10 reveils/s inutiles a vie (cout CPU permanent, sensible
-#     sur Mac Intel). L'apparition de la pastille reste immediate : le coeur
-#     reveille le main thread au changement d'etat (core.on_ui_state_change).
-INDICATOR_TICK_SECONDS = 0.1        # cadence rapide (pastille visible)
-INDICATOR_TICK_IDLE_SECONDS = 0.75  # cadence repos
+# Two cadences for the main-thread loop that drives the UI (and yields to Ctrl+C
+# in the CLI):
+#   - FAST when the dot is VISIBLE (recording/transcription): it is re-asserted
+#     to the front often, so it stays on top even if an app goes full-screen;
+#   - IDLE: much slower, since there is then almost nothing to do. This avoids 10
+#     needless wake-ups/s forever (a permanent CPU cost, noticeable on Intel
+#     Macs). The dot still appears instantly: the core wakes the main thread on
+#     each state change (core.on_ui_state_change).
+INDICATOR_TICK_SECONDS = 0.1        # fast cadence (dot visible)
+INDICATOR_TICK_IDLE_SECONDS = 0.75  # idle cadence
+# Cursor following: the dot sticks near the mouse (so on the active window, where
+# you type) instead of being pinned at the bottom center above the Dock. Set to
+# False to go back to the fixed bottom-center point (one per screen).
+INDICATOR_FOLLOW_CURSOR = True
+# Offset (dx, dy) in points relative to the cursor, in screen coords (bottom-left
+# origin): bottom-right so as not to hide the pointer.
+INDICATOR_CURSOR_OFFSET = (14.0, -18.0)
 
-# --- Presse-papier --------------------------------------------------------
-# Filet de securite : si True (defaut), la derniere transcription RESTE dans le
-# presse-papier (l'ancien contenu n'est PAS restaure). Ainsi chaque dictee est
-# captee par un gestionnaire d'historique de presse-papier (ex: Raycast) et
-# reste recollable a la main (Cmd+V) si le collage automatique s'est perdu.
-# Mets False pour revenir a l'ancien comportement (restauration du presse-papier).
+# --- Clipboard ------------------------------------------------------------
+# Safety net: if True (default), the last transcription STAYS on the clipboard
+# (the previous content is NOT restored). This way each dictation is captured by
+# a clipboard-history manager (e.g. Raycast) and can be re-pasted by hand (Cmd+V)
+# if the automatic paste got lost. Set to False for the old behavior (clipboard
+# restore).
 KEEP_LAST_IN_CLIPBOARD = True
 
-# --- Historique -----------------------------------------------------------
-# Chaque transcription reussie est journalisee ici (une ligne JSON).
+# --- History --------------------------------------------------------------
+# Every successful transcription is logged here (one JSON line).
 HISTORY_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "history.jsonl"
 )
-# Nombre d'entrees affichees par defaut par `history.py`.
+# Number of entries shown by default by `history.py`.
 HISTORY_DEFAULT_N = 20
 
-# --- Stockage utilisateur (hors dossier projet) --------------------------
-# On range les donnees runtime a cote de la cle API, dans Application Support
-# (la .app packagee n'a pas de dossier projet inscriptible).
-import credentials  # noqa: E402  (evite un cycle : credentials n'importe pas config)
+# --- User storage (outside the project folder) ---------------------------
+# We keep runtime data next to the API key, in Application Support (the packaged
+# .app has no writable project folder).
+import credentials  # noqa: E402  (avoids a cycle: credentials does not import config)
 
-# File de reprise : WAV en attente de transcription (+ sidecars .json).
+# Retry queue: WAVs awaiting transcription (+ .json sidecars).
 PENDING_DIR = os.path.join(credentials.APP_SUPPORT_DIR, "pending")
-# Dictionnaire de vocabulaire specifique (une entree par ligne, '#' = commentaire).
-# Passe tel quel a l'API via context_bias : aucune requete/credit en plus.
+# Custom vocabulary dictionary (one entry per line, '#' = comment). Passed as-is
+# to the API via context_bias: no extra request/credit.
 VOCAB_FILE = os.path.join(credentials.APP_SUPPORT_DIR, "vocabulary.txt")

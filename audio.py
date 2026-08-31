@@ -1,4 +1,4 @@
-"""Capture micro non bloquante via sounddevice, export WAV 16 kHz mono."""
+"""Non-blocking mic capture via sounddevice, exported as 16 kHz mono WAV."""
 
 import tempfile
 import wave
@@ -7,31 +7,32 @@ import numpy as np
 import sounddevice as sd
 
 import config
+import settings
 
 
 class Recorder:
-    """Enregistre le micro en continu dans un buffer tant qu'il est actif.
+    """Records the mic continuously into a buffer while active.
 
     Usage:
         rec = Recorder()
         rec.start()
         ...
-        wav_path = rec.stop()  # None si rien n'a ete capte
+        wav_path = rec.stop()  # None if nothing was captured
     """
 
     def __init__(self):
         self._frames: list[np.ndarray] = []
         self._nsamples = 0
-        self._max_samples = config.SAMPLE_RATE * config.MAX_RECORD_SECONDS
+        self._max_samples = config.SAMPLE_RATE * settings.get_max_record_seconds()
         self._stream: sd.InputStream | None = None
 
     def _callback(self, indata, frames, time_info, status):  # noqa: ARG002
-        # Appele depuis le thread audio de PortAudio : on copie, on accumule.
+        # Called from PortAudio's audio thread: copy and accumulate.
         if status:
             print(f"[audio] status: {status}")
-        # Garde-fou memoire : au-dela de MAX_RECORD_SECONDS on cesse d'accumuler
-        # (le debut deja capte reste transcrit ; evite un buffer sans borne en
-        # ecoute continue oubliee).
+        # Memory guard-rail: past the recording limit we stop accumulating (the
+        # already-captured start is still transcribed; avoids an unbounded buffer
+        # on a forgotten continuous listen).
         if self._nsamples >= self._max_samples:
             return
         self._frames.append(indata.copy())
@@ -40,6 +41,9 @@ class Recorder:
     def start(self) -> None:
         self._frames = []
         self._nsamples = 0
+        # Read the (user-adjustable) limit at each take start, so a settings
+        # change applies to the next recording without a restart.
+        self._max_samples = config.SAMPLE_RATE * settings.get_max_record_seconds()
         self._stream = sd.InputStream(
             samplerate=config.SAMPLE_RATE,
             channels=config.CHANNELS,
@@ -49,7 +53,7 @@ class Recorder:
         self._stream.start()
 
     def stop(self) -> str | None:
-        """Arrete la capture et ecrit un WAV temporaire. Retourne son chemin."""
+        """Stop capture and write a temporary WAV. Returns its path."""
         if self._stream is not None:
             self._stream.stop()
             self._stream.close()
@@ -61,7 +65,7 @@ class Recorder:
         audio = np.concatenate(self._frames, axis=0)
         self._frames = []
 
-        # Ignore les captures trop courtes (clic accidentel < ~0.25 s).
+        # Ignore takes that are too short (accidental click < ~0.25 s).
         if len(audio) < config.SAMPLE_RATE // 4:
             return None
 
@@ -71,30 +75,30 @@ class Recorder:
         os.close(fd)
         with wave.open(path, "wb") as wf:
             wf.setnchannels(config.CHANNELS)
-            wf.setsampwidth(2)  # int16 = 2 octets
+            wf.setsampwidth(2)  # int16 = 2 bytes
             wf.setframerate(config.SAMPLE_RATE)
             wf.writeframes(audio.tobytes())
         return path
 
 
 def list_input_devices() -> str:
-    """Renvoie la liste lisible des peripheriques d'entree (debug)."""
+    """Return a readable list of input devices (debug)."""
     lines = []
     for idx, dev in enumerate(sd.query_devices()):
         if dev["max_input_channels"] > 0:
             lines.append(f"  [{idx}] {dev['name']}")
-    return "\n".join(lines) or "  (aucun micro detecte)"
+    return "\n".join(lines) or "  (no microphone detected)"
 
 
 if __name__ == "__main__":
-    # Test isole : enregistre 3 secondes et ecrit un WAV.
+    # Isolated test: record 3 seconds and write a WAV.
     import time
 
-    print("Micros disponibles:")
+    print("Available microphones:")
     print(list_input_devices())
-    print("\nEnregistrement 3 s... parle !")
+    print("\nRecording 3 s... speak!")
     r = Recorder()
     r.start()
     time.sleep(3)
     out = r.stop()
-    print(f"Ecrit: {out}")
+    print(f"Written: {out}")

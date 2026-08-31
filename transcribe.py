@@ -1,7 +1,7 @@
-"""Transcription via l'API Mistral (Voxtral Mini Transcribe).
+"""Transcription via the Mistral API (Voxtral Mini Transcribe).
 
 Endpoint: POST https://api.mistral.ai/v1/audio/transcriptions
-On NE passe PAS de langue : auto-detection du franglais (melange FR/EN).
+We do NOT pass a language: auto-detect mixed FR/EN ("franglais").
 """
 
 import os
@@ -15,19 +15,19 @@ from mistralai.client import Mistral
 import config
 import credentials
 
-# En mode dev, charge un .env du dossier projet dans l'environnement ; la .app
-# n'en a pas, mais credentials.get_api_key() lira alors le fichier Application
-# Support. load_dotenv() est sans effet (et sans erreur) s'il n'y a pas de .env.
+# In dev mode, load a project-folder .env into the environment; the .app has no
+# such file, but credentials.get_api_key() will then read the Application Support
+# file. load_dotenv() is a no-op (and error-free) when there is no .env.
 load_dotenv()
 
 _client: Mistral | None = None
 
 
 def _cato_bundle_path() -> str | None:
-    """Chemin du bundle CA livre avec le projet / embarque dans la .app.
+    """Path to the CA bundle shipped with the project / embedded in the .app.
 
-    PyInstaller expose les ressources via sys._MEIPASS ; en dev on part du
-    dossier du module.
+    PyInstaller exposes resources via sys._MEIPASS; in dev we start from the
+    module's folder.
     """
     base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
     p = os.path.join(base, "certs", "cato-bundle.pem")
@@ -35,15 +35,15 @@ def _cato_bundle_path() -> str | None:
 
 
 def _ssl_context() -> ssl.SSLContext:
-    """Contexte SSL tolerant aux proxys TLS d'entreprise.
+    """SSL context tolerant of corporate TLS proxies.
 
-    Ordre de resolution :
-      1. SSL_CERT_FILE : override explicite (utilisateur/IT) -> on le respecte ;
-      2. defaut : trousseau macOS via truststore. Le certificat racine du proxy
-         (Cato/Zscaler...) installe par l'IT y est deja, donc la transcription
-         marche sans manip. C'est le chemin robuste (jamais perime) ;
-      3. filet de secours : si truststore echoue, on retombe sur le bundle
-         certs/cato-bundle.pem s'il existe, sinon sur certifi (defaut).
+    Resolution order:
+      1. SSL_CERT_FILE: explicit override (user/IT) -> we honor it;
+      2. default: the macOS keychain via truststore. The proxy root certificate
+         (Cato/Zscaler...) installed by IT is already there, so transcription
+         works with no fiddling. This is the robust path (never expires);
+      3. fallback: if truststore fails, fall back to the bundled
+         certs/cato-bundle.pem if present, otherwise certifi (default).
     """
     env = os.environ.get("SSL_CERT_FILE")
     if env and os.path.exists(env):
@@ -52,18 +52,18 @@ def _ssl_context() -> ssl.SSLContext:
         import truststore
 
         return truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    except Exception:  # noqa: BLE001 -- truststore indisponible/incompatible
+    except Exception:  # noqa: BLE001 -- truststore unavailable/incompatible
         bundle = _cato_bundle_path()
         return ssl.create_default_context(cafile=bundle) if bundle else ssl.create_default_context()
 
 
 def _make_client(api_key: str) -> Mistral:
-    """Client Mistral avec un transport HTTP qui valide via le trousseau macOS.
+    """Mistral client with an HTTP transport that validates via the macOS keychain.
 
-    On fixe un TIMEOUT explicite : sans lui, un changement/perte de reseau laisse
-    la requete suspendue indefiniment (thread de transcription bloque, pastille
-    figee). CONNECT court -> un reseau mort echoue vite et bascule en reprise ;
-    READ genereux -> couvre l'upload + la transcription d'un audio long.
+    We set an explicit TIMEOUT: without it, a network change/loss leaves the
+    request hanging indefinitely (the transcription thread blocks, the dot
+    freezes). Short CONNECT -> a dead network fails fast and switches to retry;
+    generous READ -> covers the upload + transcription of a long take.
     """
     ctx = _ssl_context()
     timeout = httpx.Timeout(
@@ -85,25 +85,25 @@ def _get_client() -> Mistral:
         api_key = credentials.get_api_key()
         if not api_key:
             raise RuntimeError(
-                "MISTRAL_API_KEY manquante. Renseigne ta cle dans l'app "
-                "(menu > Saisir la cle API), ou via un .env en mode dev."
+                "MISTRAL_API_KEY missing. Enter your key in the app "
+                "(menu > Enter API key), or via a .env in dev mode."
             )
         _client = _make_client(api_key)
     return _client
 
 
 def reset_client() -> None:
-    """Force la recreation du client (apres changement de cle dans l'app)."""
+    """Force the client to be recreated (after changing the key in the app)."""
     global _client
     _client = None
 
 
 def http_status(exc: Exception) -> int | None:
-    """Code HTTP porte par l'exception SDK/HTTP, ou None.
+    """The HTTP code carried by the SDK/HTTP exception, or None.
 
-    Les erreurs mistralai heritent de MistralError qui expose `status_code`
-    (int). On tente aussi quelques alias au cas ou, sans jamais deviner a partir
-    du texte (un "400" dans un message d'erreur n'est pas forcement un statut).
+    mistralai errors inherit from MistralError which exposes `status_code` (int).
+    We also try a few aliases just in case, but never guess from the text (a
+    "400" in an error message is not necessarily a status code).
     """
     for attr in ("status_code", "status", "code"):
         val = getattr(exc, attr, None)
@@ -113,16 +113,16 @@ def http_status(exc: Exception) -> int | None:
 
 
 def is_retriable(exc: Exception) -> bool:
-    """True si l'erreur est TRANSITOIRE (on re-tente), False si PERMANENTE.
+    """True if the error is TRANSIENT (retry), False if PERMANENT.
 
-    Politique de reprise de la file (transcribe_queue) :
-      - Transitoire -> retry backoff : timeouts, coupures reseau, 5xx, 429, 408.
-      - Permanent -> abandon : 400 (args invalides, ex. context_bias), 401/403
-        (auth), 404, 422 (validation)... et l'echec SSL d'un proxy d'entreprise
-        (config a corriger, re-tenter en boucle ne ferait que rester bleu).
-    Sans code HTTP exploitable, on se fie a la nature de l'erreur : reseau =
-    transitoire ; le reste (inconnu) est traite comme transitoire mais plafonne
-    par le nombre de tentatives / l'age max cote file.
+    Queue retry policy (transcribe_queue):
+      - Transient -> retry with back-off: timeouts, network drops, 5xx, 429, 408.
+      - Permanent -> give up: 400 (invalid args, e.g. context_bias), 401/403
+        (auth), 404, 422 (validation)... and a corporate proxy SSL failure
+        (a config to fix; retrying forever would just stay blue).
+    Without a usable HTTP code, we rely on the nature of the error: network =
+    transient; everything else (unknown) is treated as transient but capped by
+    the attempt count / max age on the queue side.
     """
     status = http_status(exc)
     if status is not None:
@@ -133,30 +133,29 @@ def is_retriable(exc: Exception) -> bool:
     kind = classify_error(exc)[0]
     if kind in ("ssl", "auth", "missing"):
         return False
-    # "network" -> transitoire ; "other" (non classe) -> transitoire mais borne.
+    # "network" -> transient; "other" (unclassified) -> transient but bounded.
     return True
 
 
 def classify_error(exc: Exception) -> tuple[str, str]:
-    """Classe une exception reseau/API et renvoie (kind, message actionnable).
+    """Classify a network/API exception and return (kind, actionable message).
 
-    On teste le SSL/certificat EN PREMIER : derriere un proxy d'entreprise,
-    l'echec est un CERTIFICATE_VERIFY_FAILED, PAS un probleme de cle. L'inverser
-    ferait dire a tort "cle refusee". kind ∈ {"ssl","auth","missing","network",
-    "other"}.
+    We test SSL/certificate FIRST: behind a corporate proxy the failure is a
+    CERTIFICATE_VERIFY_FAILED, NOT a key problem. Reversing it would wrongly say
+    "key rejected". kind in {"ssl","auth","missing","network","other"}.
     """
     low = str(exc).lower()
     if "certificate" in low or "ssl" in low or "self-signed" in low or "self signed" in low:
         return "ssl", (
-            "Proxy TLS d'entreprise : le certificat n'est pas reconnu. "
-            "(Ce n'est pas ta clé.) Voir la section proxy du README."
+            "Corporate TLS proxy: the certificate is not trusted. "
+            "(This is not your key.) See the proxy section of the README."
         )
-    # Auth AVANT "manquante" : "invalid api key" contient "api key" et serait
-    # sinon classe a tort comme cle manquante.
+    # Auth BEFORE "missing": "invalid api key" contains "api key" and would
+    # otherwise be misclassified as a missing key.
     if "401" in low or "unauthorized" in low or ("invalid" in low and "key" in low):
-        return "auth", "Clé refusée (401). Vérifie ta clé Mistral."
-    if "manquante" in low or "api_key" in low:
-        return "missing", "Clé API manquante. Renseigne-la dans le menu 🎙."
+        return "auth", "Key rejected (401). Check your Mistral key."
+    if "missing" in low or "api_key" in low:
+        return "missing", "API key missing. Enter it from the 🎙 menu."
     if (
         "connection" in low
         or "timeout" in low
@@ -165,58 +164,58 @@ def classify_error(exc: Exception) -> tuple[str, str]:
         or "resolve" in low
         or "read operation" in low
     ):
-        return "network", "Pas de réseau ou API injoignable. Réessaie."
-    return "other", f"Échec de la transcription : {str(exc)[:140]}"
+        return "network", "No network or API unreachable. Try again."
+    return "other", f"Transcription failed: {str(exc)[:140]}"
 
 
 def test_api_key() -> tuple[bool, str]:
-    """Verifie la cle courante par un appel leger (liste des modeles).
+    """Check the current key with a lightweight call (list models).
 
-    Renvoie (ok, message). Cree un client jetable (meme transport TLS que le
-    client reel) pour tester EXACTEMENT la cle enregistree, sans toucher au
-    client en cache. Un echec SSL est distingue d'une cle refusee.
+    Returns (ok, message). Creates a throwaway client (same TLS transport as the
+    real client) to test EXACTLY the stored key, without touching the cached
+    client. An SSL failure is distinguished from a rejected key.
     """
     key = credentials.get_api_key()
     if not key:
-        return False, "Aucune clé renseignée."
+        return False, "No key entered."
     try:
         _make_client(key).models.list()
-        return True, "Clé valide ✅"
+        return True, "Key valid ✅"
     except Exception as exc:  # noqa: BLE001
         return False, classify_error(exc)[1]
 
 
 _VOCAB_HEADER = (
-    "# Dictionnaire de vocabulaire specifique — MistralSpeechToText\n"
+    "# Custom vocabulary dictionary — MistralSpeechToText\n"
     "#\n"
-    "# UN SEUL MOT PAR LIGNE, sans espace ni virgule. Ces termes sont passes a\n"
-    "# l'API (context_bias) pour BIAISER la transcription vers ton vocabulaire\n"
-    "# — sans requete ni credit en plus, et sans jamais resumer ton texte.\n"
+    "# ONE WORD PER LINE, no space or comma. These terms are passed to the API\n"
+    "# (context_bias) to BIAS the transcription toward your vocabulary — with no\n"
+    "# extra request or credit, and without ever summarizing your text.\n"
     "#\n"
-    "# IMPORTANT : l'API n'accepte qu'un seul token par entree. Une ligne\n"
-    "# contenant un espace (ex. « Mistral AI ») est IGNOREE — decoupe-la en\n"
-    "# mots distincts (une ligne chacun). Les lignes vides et celles commencant\n"
-    "# par '#' sont ignorees.\n"
+    "# IMPORTANT: the API only accepts a single token per entry. A line that\n"
+    "# contains a space (e.g. « Mistral AI ») is IGNORED — split it into\n"
+    "# separate words (one per line). Empty lines and lines starting with '#' are\n"
+    "# ignored.\n"
     "#\n"
-    "# Exemples :\n"
+    "# Examples:\n"
     "#   Voxtral\n"
     "#   Mistral\n"
     "#   Kubernetes\n"
     "#   kubectl\n"
 )
 
-# Cache du vocabulaire, invalide au mtime du fichier (edite a la main).
-# (mtime, termes valides, lignes ignorees).
+# Vocabulary cache, invalidated on the file's mtime (edited by hand).
+# (mtime, valid terms, ignored lines).
 _vocab_cache: tuple[float, list[str], list[str]] | None = None
 
 
 def _valid_bias_term(line: str) -> str | None:
-    """Normalise une ligne en token context_bias valide, ou None si inexploitable.
+    """Normalize a line into a valid context_bias token, or None if unusable.
 
-    L'API exige UN SEUL token : pas d'espace, pas de virgule. On retire les
-    virgules de bord par securite ; une ligne a espace ou a virgule interne est
-    rejetee (None) — on ne devine pas comment la decouper (cela polluerait le
-    biais avec des mots courants)."""
+    The API requires a SINGLE token: no space, no comma. We strip edge commas as
+    a safety measure; a line with an inner space or comma is rejected (None) — we
+    do not guess how to split it (that would pollute the bias with common words).
+    """
     term = line.strip().strip(",").strip()
     if not term:
         return None
@@ -226,9 +225,9 @@ def _valid_bias_term(line: str) -> str | None:
 
 
 def ensure_vocab_file() -> str:
-    """Cree le fichier vocabulaire (avec en-tete d'aide) s'il n'existe pas.
+    """Create the vocabulary file (with a help header) if it does not exist.
 
-    Renvoie son chemin. Ne l'ecrase jamais s'il existe deja.
+    Returns its path. Never overwrites it if it already exists.
     """
     path = config.VOCAB_FILE
     if not os.path.exists(path):
@@ -239,13 +238,12 @@ def ensure_vocab_file() -> str:
 
 
 def load_context_bias() -> list[str]:
-    """Charge le vocabulaire assaini pour context_bias, avec cache mtime.
+    """Load the sanitized vocabulary for context_bias, with an mtime cache.
 
-    Ne renvoie QUE des tokens valides (un mot, sans espace ni virgule) : une
-    entree « sale » (multi-mots) est ignoree plutot que de faire echouer TOUT
-    l'appel avec un 400. Renvoie [] si le fichier est absent/vide ; robuste :
-    toute erreur -> []. Les lignes ignorees sont consultables via
-    ignored_bias_terms().
+    Returns ONLY valid tokens (one word, no space or comma): a "dirty" entry
+    (multi-word) is ignored rather than failing the WHOLE call with a 400.
+    Returns [] if the file is absent/empty; robust: any error -> []. Ignored
+    lines can be inspected via ignored_bias_terms().
     """
     global _vocab_cache
     path = config.VOCAB_FILE
@@ -276,15 +274,15 @@ def load_context_bias() -> list[str]:
 
 
 def ignored_bias_terms() -> list[str]:
-    """Lignes de vocabulaire ignorees (espace/virgule -> invalides pour l'API).
+    """Vocabulary lines that were ignored (space/comma -> invalid for the API).
 
-    Recharge le cache si besoin. Sert a avertir l'utilisateur (UX)."""
+    Reloads the cache if needed. Used to warn the user (UX)."""
     load_context_bias()
     return list(_vocab_cache[2]) if _vocab_cache is not None else []
 
 
 def transcribe(wav_path: str) -> str:
-    """Transcrit un fichier WAV et retourne le texte (strippe)."""
+    """Transcribe a WAV file and return the (stripped) text."""
     client = _get_client()
     with open(wav_path, "rb") as f:
         kwargs = {
@@ -293,8 +291,8 @@ def transcribe(wav_path: str) -> str:
         }
         if config.MISTRAL_LANGUAGE:
             kwargs["language"] = config.MISTRAL_LANGUAGE
-        # Biais de vocabulaire : integre a l'appel de transcription, donc aucune
-        # requete/credit supplementaire et aucun risque de resume.
+        # Vocabulary bias: folded into the transcription call, so no extra
+        # request/credit and no risk of summarization.
         terms = load_context_bias()
         if terms:
             kwargs["context_bias"] = terms
@@ -306,6 +304,6 @@ if __name__ == "__main__":
     import sys
 
     if len(sys.argv) != 2:
-        print("usage: python transcribe.py <fichier.wav>")
+        print("usage: python transcribe.py <file.wav>")
         raise SystemExit(1)
     print(transcribe(sys.argv[1]))

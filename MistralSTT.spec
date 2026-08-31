@@ -33,6 +33,7 @@ a = Analysis(
     hiddenimports=[
         "config",
         "credentials",
+        "settings",
         "transcribe",
         "transcribe_queue",
         "audio",
