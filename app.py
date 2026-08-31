@@ -423,8 +423,8 @@ class AppDelegate(NSObject):
         if core._tap is None and has_input_monitoring():
             core.install_event_tap()
 
-        # "Long take" reminder (never cuts off the in-progress take).
-        core.maybe_warn_long_recording()
+        # Warn as the take nears the limit, and auto-stop + send at the limit.
+        core.tick_recording_limit()
 
         # Dot: we render only on a state change.
         if self._indicator is not None:

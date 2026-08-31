@@ -124,29 +124,54 @@ def _recompute_ui() -> None:
     _set_ui_state(state)
 
 
-def _warn_threshold_seconds() -> float:
+def _warn_threshold_seconds(cap: float) -> float:
     """When (seconds into a take) to warn: RECORD_WARN_LEAD_SECONDS before the cap.
 
     Anchored to the real cut-off (the user-adjustable recording limit), never an
     arbitrary duration. For a very short custom limit (< the lead), we fall back
-    to 75% of it so the reminder still lands before audio is dropped."""
-    cap = settings.get_max_record_seconds()
+    to 75% of it so the reminder still lands before the auto-stop."""
     lead = config.RECORD_WARN_LEAD_SECONDS
     return cap - lead if cap > lead else cap * 0.75
 
 
-def maybe_warn_long_recording() -> None:
-    """Warn as a take nears the recording limit (never cuts it off).
+def _auto_stop_at_limit() -> None:
+    """Reached the recording limit: stop exactly like a manual stop.
 
-    Call on EVERY tick of both UI drivers (the CLI loop and the .app NSTimer).
-    Recording is NEVER interrupted: about RECORD_WARN_LEAD_SECONDS before the
-    (user-adjustable) limit we play a sound ONCE and switch the dot to
-    "recording_long" (distinct color + pulse) as a heads-up to wrap up. Returns
-    immediately when idle (nothing to do outside a take)."""
+    So the captured audio is transcribed and pasted at the cursor — nothing
+    spoken up to the limit is silently dropped. Called on the MAIN thread (a tick
+    driver). A simultaneous manual release would just enqueue a harmless second
+    'stop' (empty take)."""
+    global state, _recording_active, _recording_started_at, _warned_long
+    state = IDLE
+    _recording_active = False
+    _recording_started_at = None
+    _warned_long = False
+    _recompute_ui()
+    _actions.put("stop")
+    print("[mistral-stt] recording limit reached -> auto-stop + send")
+    notices.put("Recording limit reached — dictation sent ✅")
+
+
+def tick_recording_limit() -> None:
+    """Manage the recording limit; call on EVERY tick of both UI drivers.
+
+    Anchored to the real cut-off (the user-adjustable limit), never an arbitrary
+    duration:
+      - about RECORD_WARN_LEAD_SECONDS before the limit: switch the dot to
+        "recording_long" (distinct color + pulse, held until you stop) and play a
+        sound ONCE as a heads-up. Recording is NOT interrupted here;
+      - AT the limit: auto-stop and send, so the captured audio is delivered and
+        nothing said up to the limit is lost.
+    Returns immediately when idle (nothing to do outside a take)."""
     global _warned_long
     if not _recording_active or _recording_started_at is None:
         return
-    if time.monotonic() - _recording_started_at < _warn_threshold_seconds():
+    elapsed = time.monotonic() - _recording_started_at
+    cap = settings.get_max_record_seconds()
+    if elapsed >= cap:
+        _auto_stop_at_limit()
+        return
+    if elapsed < _warn_threshold_seconds(cap):
         return
     if not _warned_long:
         _warned_long = True
@@ -497,8 +522,8 @@ def main() -> None:
 
     last_rendered = None
     while _running:
-        # "Long take" reminder (never cuts off the in-progress take).
-        maybe_warn_long_recording()
+        # Warn as the take nears the limit, and auto-stop + send at the limit.
+        tick_recording_limit()
         if indicator is None:
             tick = 0.25
         elif _ui_state in ("recording", "recording_long", "transcribing"):

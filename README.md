@@ -45,12 +45,17 @@ stays visible across all Spaces, including over full-screen apps. (Set
 `INDICATOR_FOLLOW_CURSOR = False` in `config.py` to pin it at the bottom center
 instead.)
 
-A single take has a **recording limit** — the one place a very long take is cut
-(audio past it isn't captured). It defaults to **10 minutes** to keep memory low
-and is adjustable up to **60 minutes** (the Mistral Voxtral API's own limit) from
-the menu-bar **Recording limit…** item. About **1.5 minutes before** that limit,
-the dot turns a **pulsing pink-red** and a short sound plays **once** to nudge you
-to wrap up and send — recording is **never** interrupted by the warning itself.
+A single take has a **recording limit**. It defaults to **10 minutes** to keep
+memory low and is adjustable up to **60 minutes** (the Mistral Voxtral API's own
+limit) from the menu-bar **Recording limit…** item. Around it you get two cues:
+
+- **~1.5 min before** the limit, the dot turns a **pulsing pink-red** and a short
+  sound plays **once** — a heads-up to wrap up. Recording keeps going.
+- **At** the limit, the take **auto-stops and sends**: the captured audio is
+  transcribed and pasted just like a manual stop, and a notification confirms it.
+  So nothing you said up to the limit is ever silently dropped. (Speech *after*
+  the auto-stop isn't captured until you trigger a new take — but you were warned,
+  and you can raise the limit if you routinely dictate longer.)
 
 ## Install the app (recommended, ~5 minutes)
 
