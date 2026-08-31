@@ -804,3 +804,7 @@ def main() -> None:
     delegate = AppDelegate.alloc().init()
     app.setDelegate_(delegate)
     app.run()
+
+
+if __name__ == "__main__":
+    main()
