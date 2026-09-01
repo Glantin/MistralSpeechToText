@@ -101,10 +101,11 @@ INDICATOR_ENABLED = True
 #     each state change (core.on_ui_state_change).
 INDICATOR_TICK_SECONDS = 0.1        # fast cadence (dot visible)
 INDICATOR_TICK_IDLE_SECONDS = 0.75  # idle cadence
-# Cursor following: the dot sticks near the mouse (so on the active window, where
-# you type) instead of being pinned at the bottom center above the Dock. Set to
-# False to go back to the fixed bottom-center point (one per screen).
-INDICATOR_FOLLOW_CURSOR = True
+# Cursor following: when True, the dot sticks near the mouse (on the active
+# window, where you type) instead of being pinned at the bottom center. Default
+# is False: a fixed bottom-center dot, one per screen, always visible while you
+# speak (it stays put and is far less distracting than following the cursor).
+INDICATOR_FOLLOW_CURSOR = False
 # Offset (dx, dy) in points relative to the cursor, in screen coords (bottom-left
 # origin): bottom-right so as not to hide the pointer.
 INDICATOR_CURSOR_OFFSET = (14.0, -18.0)
