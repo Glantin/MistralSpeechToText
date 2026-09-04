@@ -9,8 +9,8 @@ certs/
 # macOS
 .DS_Store
 
-# Python / virtualenv
-.venv/
+# Python / virtualenv (.venv arm64 + .venv-x64 pour le build universal2)
+.venv*/
 __pycache__/
 *.pyc
 

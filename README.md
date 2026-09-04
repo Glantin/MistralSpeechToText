@@ -186,18 +186,24 @@ changes on every rebuild — which makes macOS **forget the permissions** you
 granted (Input Monitoring, Accessibility…) each time. With the stable identity,
 the app keeps the same identity across rebuilds and permissions persist.
 
-Then build the app:
+Then build the app. Two scripts are available:
 
 ```bash
-bash build_app.sh
+bash build_universal.sh   # universal2 (Intel + Apple Silicon) — recommended for releases
+bash build_app.sh         # single-arch, your machine's architecture only
 ```
 
-This syncs dependencies, runs PyInstaller (`MistralSTT.spec`), signs the bundle
-(with the stable identity if present), and writes `dist/MistralSTT.app` and
+Both sync dependencies, run PyInstaller (`MistralSTT.spec`), sign the bundle
+(with the stable identity if present), and write `dist/MistralSTT.app` and
 `dist/MistralSTT.zip`. The app embeds its own Python, so the end user needs
 nothing installed. Inside the app, the API key is stored in
 `~/Library/Application Support/MistralSTT/.env` (entered via the onboarding
 window) instead of a project `.env`.
+
+Prefer `build_universal.sh` for published releases: an Intel-only build runs
+under **Rosetta 2**, which Apple is phasing out, and the emulation also adds
+latency to the keyboard event tap (system-wide typing lag). A `universal2`
+build is native on both Intel and Apple Silicon and avoids both problems.
 
 > If permissions still won't stick after a rebuild, the macOS privacy database
 > may hold stale entries from older builds. Reset them with
@@ -206,17 +212,17 @@ window) instead of a project `.env`.
 
 Notes:
 
-- The build targets **your machine's architecture** (Intel or Apple Silicon).
-  An **Intel (x86_64) build runs fine on Apple Silicon via Rosetta 2**, which
-  macOS offers to install automatically the first time you open the app. For a
-  lightweight menu-bar app the performance difference is imperceptible, so a
-  single Intel build already covers both platforms — which is how the published
-  releases are shipped.
-- If you ever want a **native `universal2` binary** (no Rosetta): it requires a
-  `universal2` Python from python.org (not the single-arch Python that `uv`
-  provides) and either `universal2` wheels or manually fused x86_64 + arm64
-  wheels for every native dependency (numpy, pydantic-core, PortAudio, pyobjc…).
-  Then add `target_arch="universal2"` to the `EXE(...)` in `MistralSTT.spec`.
+- **`build_universal.sh` produces a native `universal2` binary** (x86_64 +
+  arm64) so it runs natively on both Intel and Apple Silicon — no Rosetta.
+  It does **not** use `target_arch="universal2"` in the spec: that path needs a
+  `universal2` Python plus fat wheels for every native dependency, and key deps
+  (numpy, pydantic-core) ship **no** `universal2` wheel — only separate x86_64
+  and arm64 — so PyInstaller would fail. Instead the script builds the app
+  twice (arm64 natively, x86_64 under Rosetta 2) and **fuses the two bundles
+  with `lipo`**. The x86_64 sub-build needs Rosetta 2 installed
+  (`softwareupdate --install-rosetta`).
+- `build_app.sh` targets **your machine's architecture only** (single-arch).
+  Use it for quick local testing; use `build_universal.sh` for releases.
 - The app is **not notarized**. With an Apple Developer ID you can sign and
   notarize it later (no code changes needed) to remove the first-launch warning.
 
