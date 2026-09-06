@@ -224,6 +224,30 @@ def _log(msg: str) -> None:
         print(f"[mistral-stt:debug] {msg}")
 
 
+def runtime_arch() -> str:
+    """Describe the architecture this process actually runs as.
+
+    For the universal2 (lipo) build diagnosis: tells apart a native arm64 run
+    from an x86_64 slice running under Rosetta on Apple Silicon.
+    """
+    import platform
+
+    machine = platform.machine()  # 'arm64' or 'x86_64' — the RUNNING slice
+    rosetta = "?"
+    try:
+        # sysctl.proc_translated: 1 if the process runs under Rosetta.
+        out = subprocess.run(
+            ["sysctl", "-in", "sysctl.proc_translated"],
+            capture_output=True,
+            text=True,
+            timeout=1.0,
+        )
+        rosetta = out.stdout.strip() or "0"
+    except Exception:  # noqa: BLE001
+        pass
+    return f"machine={machine} rosetta_translated={rosetta}"
+
+
 def _play(sound: str | None) -> None:
     if sound:
         subprocess.Popen(
@@ -263,9 +287,16 @@ def _worker() -> None:
             wav_path = recorder.stop()
             _play(config.SOUND_DONE)
             if not wav_path:
+                _log("stop -> recorder returned no WAV (empty/too-short take)")
                 print("[mistral-stt] (nothing to transcribe)")
                 _recompute_ui()
                 continue
+            if DEBUG:
+                try:
+                    size = os.path.getsize(wav_path)
+                except OSError:
+                    size = -1
+                _log(f"stop -> WAV {wav_path} ({size} bytes) -> enqueue")
             # We ENQUEUE the take (separate transcription thread + persistent
             # retry). Transcription no longer blocks this worker: a slow/dropped
             # network call no longer prevents a new recording, and the audio is
@@ -392,6 +423,32 @@ def recover_pending() -> int:
     return transcribe_queue.recover_pending()
 
 
+def preflight_key_check() -> None:
+    """Warn (once, at startup) if the API key is missing or rejected.
+
+    The .app already does this (app._preflight_key_check). In CLI/source mode
+    there was NO such warning: a bad key stayed silent until a dictation failed
+    (e.g. a stale project .env shadowing the stored key). Non-blocking: the
+    network test runs in a daemon thread.
+    """
+    import credentials
+    import transcribe
+
+    if not credentials.has_api_key():
+        print(
+            "[mistral-stt] ⚠ No API key set. Add MISTRAL_API_KEY to a .env, or "
+            "enter it via the app menu."
+        )
+        return
+
+    def _go() -> None:
+        ok, msg = transcribe.test_api_key()
+        if not ok:
+            print(f"[mistral-stt] ⚠ API key check failed: {msg}")
+
+    threading.Thread(target=_go, daemon=True).start()
+
+
 def _tap_thread_main(ready: "threading.Event", result: dict) -> None:
     """Create the tap and PUMP its own run loop, on a DEDICATED thread.
 
@@ -461,6 +518,7 @@ def main() -> None:
     global _tap
 
     print("MistralSpeechToText — voice dictation (Mistral Voxtral)")
+    _log(f"runtime arch: {runtime_arch()}")
     print("Detected microphones:")
     print(list_input_devices())
     print(
@@ -495,6 +553,9 @@ def main() -> None:
     n = recover_pending()
     if n:
         print(f"[mistral-stt] {n} pending take(s) resumed (network).")
+
+    # Surface a missing/rejected key immediately (instead of after a failed take).
+    preflight_key_check()
 
     if not install_event_tap():
         print(

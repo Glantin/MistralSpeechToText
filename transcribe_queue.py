@@ -30,6 +30,14 @@ import config
 import history
 import transcribe as _transcribe
 
+# Debug logging, gated by the same env var as mistral_stt (silent otherwise).
+_DEBUG = bool(os.environ.get("MISTRAL_STT_DEBUG"))
+
+
+def _log(msg: str) -> None:
+    if _DEBUG:
+        print(f"[transcribe_queue:debug] {msg}")
+
 # --- Shared state ---------------------------------------------------------
 _cond = threading.Condition(threading.RLock())
 # jobid -> {"wav_path", "created_ts", "attempts", "next_try_ts", "ever_deferred"}
@@ -257,6 +265,7 @@ def _run() -> None:
             meta = _jobs[jobid]
             wav = meta["wav_path"]
             _active_jobid = jobid
+        _log(f"picked job {jobid} ({wav}) -> transcribing (amber)")
         _notify_state()  # -> amber dot (transcription in progress)
 
         # Network call OUTSIDE the lock (blocking, bounded by the HTTP timeout).
@@ -297,6 +306,10 @@ def _run() -> None:
         _notify_state()  # -> idle / blue (depending on remaining jobs)
 
         if ok:
+            _log(
+                f"job {jobid} transcribed ok: {len(text or '')} chars, "
+                f"deferred={ever_deferred}"
+            )
             if text:
                 # Log BEFORE delivery: the trace exists no matter what.
                 try:
@@ -304,6 +317,11 @@ def _run() -> None:
                 except Exception:  # noqa: BLE001
                     pass
                 cb = deliver_deferred if ever_deferred else deliver_immediate
+                _log(
+                    "delivering via "
+                    + ("deliver_deferred (clipboard)" if ever_deferred
+                       else "deliver_immediate (paste)")
+                )
                 if cb is not None:
                     try:
                         cb(text)

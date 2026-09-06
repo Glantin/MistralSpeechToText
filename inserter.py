@@ -5,6 +5,7 @@ instant and handles accents / mixed-language text cleanly. The previous
 clipboard contents are saved and then restored.
 """
 
+import os
 import time
 
 from AppKit import NSPasteboard, NSStringPboardType
@@ -12,11 +13,43 @@ from Quartz import (
     CGEventCreateKeyboardEvent,
     CGEventPost,
     CGEventSetFlags,
+    CGEventSourceFlagsState,
     kCGEventFlagMaskCommand,
+    kCGEventSourceStateCombinedSessionState,
     kCGHIDEventTap,
 )
 
 _V_KEYCODE = 9  # the "v" key
+
+# Debug logging, gated by the same env var as mistral_stt (silent otherwise).
+_DEBUG = bool(os.environ.get("MISTRAL_STT_DEBUG"))
+
+
+def _log(msg: str) -> None:
+    if _DEBUG:
+        print(f"[inserter:debug] {msg}")
+
+
+# Modifier-flag masks used to describe the ambient keyboard state at paste time.
+# A paste fired while (say) Option is physically held can be swallowed by the
+# target app -> empty paste. We only LOG this here (diagnostics); the guard that
+# waits for release is added with the paste hardening.
+_MOD_MASKS = {
+    "cmd": 0x00100000,    # kCGEventFlagMaskCommand
+    "shift": 0x00020000,  # kCGEventFlagMaskShift
+    "ctrl": 0x00040000,   # kCGEventFlagMaskControl
+    "option": 0x00080000,  # kCGEventFlagMaskAlternate
+}
+
+
+def _ambient_modifiers() -> str:
+    """Human-readable list of modifiers currently held on the real keyboard."""
+    try:
+        flags = CGEventSourceFlagsState(kCGEventSourceStateCombinedSessionState)
+    except Exception as exc:  # noqa: BLE001
+        return f"<unavailable: {exc}>"
+    held = [name for name, mask in _MOD_MASKS.items() if flags & mask]
+    return "+".join(held) if held else "none"
 
 
 def set_clipboard(text: str) -> None:
@@ -53,10 +86,18 @@ def insert_at_cursor(text: str, restore: bool = True) -> None:
     """
     if not text:
         return
+    pb = NSPasteboard.generalPasteboard()
+    before = pb.changeCount()
     previous = _get_clipboard()
     set_clipboard(text)
+    after = pb.changeCount()
+    _log(
+        f"clipboard set ({len(text)} chars), changeCount {before} -> {after}, "
+        f"ambient modifiers: {_ambient_modifiers()}"
+    )
     # Small delay to let the clipboard propagate before pasting.
     time.sleep(0.05)
+    _log(f"sending Cmd+V (ambient modifiers: {_ambient_modifiers()})")
     _send_cmd_v()
     # Let the target app consume the paste before restoring.
     time.sleep(0.15)

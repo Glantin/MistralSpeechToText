@@ -55,6 +55,20 @@ def test_classify_error_auth():
     assert transcribe.classify_error(Exception("Invalid API key"))[0] == "auth"
 
 
+def test_classify_error_auth_by_status_code():
+    # A rejected/forbidden key must be classified as auth even if the message
+    # text carries no HTTP number (we read the status code).
+    assert transcribe.classify_error(_HTTPExc("nope", 401))[0] == "auth"
+    assert transcribe.classify_error(_HTTPExc("nope", 403))[0] == "auth"
+
+
+def test_classify_error_forbidden_mentions_access_not_app():
+    # 403 = key lacks Voxtral access: the message must make clear it's a key
+    # issue, not the app.
+    _, msg = transcribe.classify_error(_HTTPExc("Forbidden", 403))
+    assert "403" in msg
+
+
 def test_classify_error_network():
     assert transcribe.classify_error(Exception("Connection timeout"))[0] == "network"
 

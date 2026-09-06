@@ -202,6 +202,12 @@ class AppDelegate(NSObject):
             )
         core.install_event_tap()  # may fail while the permission is missing
 
+        # Universal2 (lipo) safety net: if the app runs as an x86_64 slice under
+        # Rosetta on Apple Silicon, native event/pasteboard behavior can differ.
+        # Warn only in that (abnormal) case; silent otherwise.
+        if "rosetta_translated=1" in core.runtime_arch():
+            _notify("Running under Rosetta (x86_64). A native build is recommended.")
+
         self._build_status_item()
 
         # Onboarding on first launch: no key OR missing permissions.

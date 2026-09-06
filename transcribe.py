@@ -150,10 +150,21 @@ def classify_error(exc: Exception) -> tuple[str, str]:
             "Corporate TLS proxy: the certificate is not trusted. "
             "(This is not your key.) See the proxy section of the README."
         )
-    # Auth BEFORE "missing": "invalid api key" contains "api key" and would
-    # otherwise be misclassified as a missing key.
-    if "401" in low or "unauthorized" in low or ("invalid" in low and "key" in low):
-        return "auth", "Key rejected (401). Check your Mistral key."
+    # Auth / access BEFORE "missing": "invalid api key" contains "api key" and
+    # would otherwise be misclassified as a missing key. We prefer the HTTP code
+    # (precise, language-independent) and fall back to the message text.
+    status = http_status(exc)
+    if status == 403 or "forbidden" in low:
+        return "auth", (
+            "Access denied (403): this Mistral key cannot use Voxtral "
+            "transcription (plan/permissions). This is a key/account issue, "
+            "not the app — check your key at console.mistral.ai."
+        )
+    if status == 401 or "401" in low or "unauthorized" in low or ("invalid" in low and "key" in low):
+        return "auth", (
+            "Key rejected (401): your Mistral key is invalid or expired. "
+            "This is a key issue, not the app — update it from the 🎙 menu."
+        )
     if "missing" in low or "api_key" in low:
         return "missing", "API key missing. Enter it from the 🎙 menu."
     if (
