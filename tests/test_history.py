@@ -1,7 +1,15 @@
 """Unit tests for the JSONL transcription history (history.py)."""
 
 import config
+import credentials
 import history
+
+
+def test_history_path_is_writable_app_support():
+    # Must live in Application Support (writable), NOT next to the module: the
+    # packaged .app is read-only there, which silently killed the history.
+    assert config.HISTORY_PATH.startswith(credentials.APP_SUPPORT_DIR)
+    assert config.HISTORY_PATH.endswith("history.jsonl")
 
 
 def test_append_then_read_roundtrip(tmp_path, monkeypatch):

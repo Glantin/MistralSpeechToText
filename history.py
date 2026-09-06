@@ -1,8 +1,9 @@
 """MistralSpeechToText transcription history.
 
 Every successful transcription is logged to history.jsonl (one JSON line per
-entry). Useful when a paste is lost (no text field focused): you can find the
-text and copy it again.
+entry), stored in Application Support (config.HISTORY_PATH) so it is writable in
+the packaged .app too. Useful when a paste is lost (no text field focused, or a
+missing Accessibility permission): you can find the text and copy it again.
 
 CLI usage:
     uv run python history.py            # show the last N entries

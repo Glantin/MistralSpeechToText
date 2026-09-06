@@ -94,3 +94,10 @@ else
 fi
 echo
 echo "Test local : ouvre $APP (clic droit > Ouvrir la 1re fois)."
+echo
+echo "RAPPEL fiabilite : une signature auto-signee (ad-hoc ou 'Self-Signed') peut"
+echo "  RE-INITIALISER l'autorisation Accessibilite a chaque rebuild -> le collage"
+echo "  au curseur echoue en silence. Apres cette build, verifie :"
+echo "  Reglages Systeme > Confidentialite et securite > Accessibilite -> MistralSTT ON."
+echo "  (Le code garde desormais le texte sur le presse-papiers + notifie si c'est OFF.)"
+echo "  Persistance totale = signature Developer ID Apple."

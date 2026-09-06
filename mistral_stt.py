@@ -45,6 +45,7 @@ from Quartz import (
 )
 
 import config
+import inserter
 import settings
 import transcribe_queue
 from audio import Recorder, list_input_devices
@@ -191,10 +192,27 @@ notices: "queue.Queue[str]" = queue.Queue()
 
 
 def _deliver_immediate(text: str) -> None:
-    """Delivery of a transcription that succeeded on the first try: paste at cursor."""
+    """Delivery of a transcription that succeeded on the first try: paste at cursor.
+
+    If the paste could NOT be fired (Accessibility missing, or a modifier still
+    held), the text is already on the clipboard (safety net): we make the failure
+    VISIBLE (green flash + notification) instead of losing it silently. This is
+    the exact case that made 'nothing gets pasted' silent after a rebuild reset
+    the Accessibility permission.
+    """
     print(f"[mistral-stt] inserted ({len(text)} characters):")
     print(text)
-    insert_at_cursor(text, restore=not config.KEEP_LAST_IN_CLIPBOARD)
+    pasted = insert_at_cursor(text, restore=not config.KEEP_LAST_IN_CLIPBOARD)
+    if not pasted:
+        _log("immediate paste not fired -> visible clipboard fallback")
+        set_clipboard(text)  # ensure it is on the clipboard even if restore ran
+        _set_ui_state("recovered")  # green flash (visual confirmation)
+        if inserter.has_accessibility():
+            notices.put("Paste held back — text copied, press Cmd+V to paste")
+        else:
+            notices.put(
+                "Accessibility off — text copied (Cmd+V). Enable it in the 🎙 menu."
+            )
 
 
 def _deliver_deferred(text: str) -> None:
@@ -216,6 +234,17 @@ def _deliver_error(message: str) -> None:
     clear notification, then back to idle. Distinct from a mere wait."""
     print(f"[mistral-stt] definitive failure: {message}")
     _set_ui_state("error")  # orange flash (failure, distinct from the 'waiting' blue)
+    errors.put(message)
+
+
+def _deliver_empty(message: str) -> None:
+    """EMPTY transcription: the audio is PRESERVED (never lost), user warned.
+
+    An empty result on a real take is an API hiccup, not silence. The WAV is kept
+    in unresolved/ (retry from the menu). We flash + notify so it is never a
+    silent 'nothing happened'."""
+    print(f"[mistral-stt] empty transcription: {message}")
+    _set_ui_state("error")  # visible flash (needs user attention / retry)
     errors.put(message)
 
 
@@ -408,6 +437,7 @@ def start_transcribe_worker() -> "threading.Thread | None":
     transcribe_queue.deliver_deferred = _deliver_deferred
     transcribe_queue.on_error = errors.put
     transcribe_queue.on_permanent_error = _deliver_error
+    transcribe_queue.on_empty = _deliver_empty
     # Create the vocabulary dictionary (with a help header) if it is missing.
     try:
         import transcribe as _t
@@ -419,8 +449,26 @@ def start_transcribe_worker() -> "threading.Thread | None":
 
 
 def recover_pending() -> int:
-    """Resume the pending takes left by a previous session."""
-    return transcribe_queue.recover_pending()
+    """Resume the pending takes left by a previous session.
+
+    Also purges preserved (empty) takes that are too old. If any preserved take
+    remains, surfaces a one-off notice so the user can retry it (menu / CLI)."""
+    n = transcribe_queue.recover_pending()
+    try:
+        transcribe_queue.purge_unresolved()
+        u = transcribe_queue.unresolved_count()
+        if u:
+            notices.put(
+                f"{u} take(s) with empty transcription kept — retry from the 🎙 menu"
+            )
+    except Exception:  # noqa: BLE001
+        pass
+    return n
+
+
+def retry_unresolved() -> int:
+    """Re-enqueue the preserved (empty) takes for a fresh attempt."""
+    return transcribe_queue.retry_unresolved()
 
 
 def preflight_key_check() -> None:

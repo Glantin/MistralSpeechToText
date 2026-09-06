@@ -52,6 +52,7 @@ deliver_immediate = None  # (text: str) -> None: paste at cursor
 deliver_deferred = None   # (text: str) -> None: clipboard + flash + notif
 on_error = None           # (message: str) -> None: first TRANSIENT failure (optional)
 on_permanent_error = None  # (message: str) -> None: job GIVEN UP (permanent error)
+on_empty = None           # (message: str) -> None: EMPTY transcription, audio preserved
 
 
 def _notify_state() -> None:
@@ -114,6 +115,33 @@ def _remove_job(jobid: str) -> None:
             os.remove(p)
         except OSError:
             pass
+
+
+def _wav_size(wav: str) -> int:
+    try:
+        return os.path.getsize(wav)
+    except OSError:
+        return 0
+
+
+def _move_to_unresolved(jobid: str) -> None:
+    """Preserve a job's WAV in UNRESOLVED_DIR and drop it from the queue.
+
+    Used when a transcription keeps coming back EMPTY: the audio is kept (never
+    lost) but OUT of the auto-retry queue, so it is never re-run in a loop. The
+    user re-runs it on demand via retry_unresolved()."""
+    meta = _jobs.pop(jobid, None)
+    wav = meta["wav_path"] if meta else _wav_path(jobid)
+    try:
+        os.makedirs(config.UNRESOLVED_DIR, exist_ok=True)
+        dest = os.path.join(config.UNRESOLVED_DIR, f"{jobid}.wav")
+        shutil.move(wav, dest)
+    except OSError:
+        pass
+    try:
+        os.remove(_sidecar_path(jobid))
+    except OSError:
+        pass
 
 
 def _backoff_for(attempts: int) -> float:
@@ -212,6 +240,55 @@ def recover_pending() -> int:
     return recovered
 
 
+def unresolved_count() -> int:
+    """Number of preserved (empty-transcription) takes awaiting a manual retry."""
+    d = config.UNRESOLVED_DIR
+    if not os.path.isdir(d):
+        return 0
+    return sum(1 for n in os.listdir(d) if n.endswith(".wav"))
+
+
+def purge_unresolved() -> int:
+    """Delete preserved takes older than PENDING_MAX_AGE_SECONDS. Returns count."""
+    d = config.UNRESOLVED_DIR
+    if not os.path.isdir(d):
+        return 0
+    now = time.time()
+    purged = 0
+    for name in os.listdir(d):
+        if not name.endswith(".wav"):
+            continue
+        p = os.path.join(d, name)
+        try:
+            if now - os.path.getmtime(p) > config.PENDING_MAX_AGE_SECONDS:
+                os.remove(p)
+                purged += 1
+        except OSError:
+            pass
+    return purged
+
+
+def retry_unresolved() -> int:
+    """Re-enqueue every preserved (empty) take for a fresh transcription attempt.
+
+    Called on demand (menu / CLI). Each WAV is moved back into the normal queue
+    via enqueue() (new jobid), so a manual retry can rescue a dictation whose
+    first transcription came back empty. Returns the number re-enqueued."""
+    d = config.UNRESOLVED_DIR
+    if not os.path.isdir(d):
+        return 0
+    n = 0
+    for name in os.listdir(d):
+        if not name.endswith(".wav"):
+            continue
+        src = os.path.join(d, name)
+        before = _wav_size(src)
+        enqueue(src)  # moves the WAV into PENDING_DIR under a fresh jobid
+        if before and not os.path.exists(src):
+            n += 1
+    return n
+
+
 def start() -> threading.Thread | None:
     """Start the transcription worker (idempotent)."""
     global _started
@@ -282,11 +359,32 @@ def _run() -> None:
 
         first_failure = False
         gave_up = False
+        empty_retry = False
+        empty_preserved = False
         with _cond:
             _active_jobid = None
             if ok:
                 ever_deferred = _jobs.get(jobid, {}).get("ever_deferred", False)
-                _remove_job(jobid)
+                if text:
+                    _remove_job(jobid)
+                else:
+                    # EMPTY transcription. A tiny take is a genuine (accidental)
+                    # empty -> drop quietly. A non-trivial take almost never is:
+                    # do at most EMPTY_RETRY_ATTEMPTS immediate re-attempts (never
+                    # a loop), then PRESERVE the audio so it is never lost.
+                    m = _jobs.get(jobid)
+                    trivial = _wav_size(wav) < config.EMPTY_MIN_WAV_BYTES
+                    if m is None or trivial:
+                        _remove_job(jobid)
+                    else:
+                        m["empty_attempts"] = m.get("empty_attempts", 0) + 1
+                        if m["empty_attempts"] <= config.EMPTY_RETRY_ATTEMPTS:
+                            m["next_try_ts"] = time.time()  # bounded immediate retry
+                            _write_sidecar(jobid, m)
+                            empty_retry = True
+                        else:
+                            _move_to_unresolved(jobid)
+                            empty_preserved = True
             else:
                 m = _jobs.get(jobid)
                 if m is not None:
@@ -327,7 +425,17 @@ def _run() -> None:
                         cb(text)
                     except Exception:  # noqa: BLE001
                         pass
-            # empty text: nothing to deliver (job already removed).
+            elif empty_retry:
+                _log(f"job {jobid} empty -> bounded immediate re-attempt")
+            elif empty_preserved:
+                _log(f"job {jobid} empty -> preserved in unresolved/ (audio kept)")
+                cb = on_empty or on_permanent_error or on_error
+                if cb is not None:
+                    try:
+                        cb("Empty transcription — audio kept, retry from the 🎙 menu")
+                    except Exception:  # noqa: BLE001
+                        pass
+            # trivial empty take: nothing to deliver (job already removed).
         elif gave_up:
             # DEFINITIVE failure (job removed): we report it every time (it is a
             # give-up, not a mere wait) via on_permanent_error -> error flash +

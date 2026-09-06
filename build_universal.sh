@@ -184,3 +184,6 @@ echo "  dist/MistralSTT.zip   (a publier en GitHub Release)"
 echo
 echo "Test local : ouvre $APP (clic droit > Ouvrir la 1re fois)."
 echo "Nouveau binaire -> re-accorde Surveillance des entrees + Accessibilite + Micro."
+echo "  IMPORTANT : sans Accessibilite, l'enregistrement marche mais le collage au"
+echo "  curseur echoue EN SILENCE. Le code garde le texte sur le presse-papiers +"
+echo "  notifie si c'est OFF, mais re-active la permission pour un collage direct."

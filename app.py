@@ -361,6 +361,13 @@ class AppDelegate(NSObject):
         menu.addItem_(
             self._mk_item("Recording limit…", b"setRecordLimit:")
         )
+        # Shown only when takes are preserved after an empty transcription (see
+        # _refresh_menu): re-runs them so a dictation is never lost.
+        self._retry_item = self._mk_item(
+            "Retry empty transcriptions", b"retryUnresolved:"
+        )
+        self._retry_item.setHidden_(True)
+        menu.addItem_(self._retry_item)
         menu.addItem_(NSMenuItem.separatorItem())
         menu.addItem_(self._mk_item("Quit", b"quitApp:"))
 
@@ -395,6 +402,14 @@ class AppDelegate(NSObject):
         self._login_item.setState_(
             NSControlStateValueOn if login_enabled() else NSControlStateValueOff
         )
+        # Surface the retry item only when there is something to retry.
+        try:
+            u = core.transcribe_queue.unresolved_count()
+        except Exception:  # noqa: BLE001
+            u = 0
+        self._retry_item.setHidden_(u == 0)
+        if u:
+            self._retry_item.setTitle_(f"Retry empty transcriptions ({u})")
 
     # --- Main timer ---
     @objc.python_method
@@ -538,6 +553,15 @@ class AppDelegate(NSObject):
             return
         stored = settings.set_max_record_minutes(minutes)
         _notify(f"Recording limit set to {stored} min (applies to the next take).")
+
+    def retryUnresolved_(self, sender):  # noqa: N802, ARG002
+        """Re-queue takes preserved after an empty transcription (never lost)."""
+        n = core.retry_unresolved()
+        self._refresh_menu()
+        if n:
+            _notify(f"{n} take(s) re-queued for transcription.")
+        else:
+            _notify("No empty takes to retry.")
 
     def toggleLogin_(self, sender):  # noqa: N802, ARG002
         ok, msg = set_login_enabled(not login_enabled())

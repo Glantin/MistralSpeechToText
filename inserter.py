@@ -19,6 +19,8 @@ from Quartz import (
     kCGHIDEventTap,
 )
 
+import config
+
 _V_KEYCODE = 9  # the "v" key
 
 # Debug logging, gated by the same env var as mistral_stt (silent otherwise).
@@ -32,8 +34,8 @@ def _log(msg: str) -> None:
 
 # Modifier-flag masks used to describe the ambient keyboard state at paste time.
 # A paste fired while (say) Option is physically held can be swallowed by the
-# target app -> empty paste. We only LOG this here (diagnostics); the guard that
-# waits for release is added with the paste hardening.
+# target app -> empty paste. insert_at_cursor() waits for these to be released
+# before firing Cmd+V (see _wait_modifiers_released); we also LOG them here.
 _MOD_MASKS = {
     "cmd": 0x00100000,    # kCGEventFlagMaskCommand
     "shift": 0x00020000,  # kCGEventFlagMaskShift
@@ -50,6 +52,51 @@ def _ambient_modifiers() -> str:
         return f"<unavailable: {exc}>"
     held = [name for name, mask in _MOD_MASKS.items() if flags & mask]
     return "+".join(held) if held else "none"
+
+
+def _modifiers_held() -> bool:
+    """True if ANY paste-breaking modifier is currently held on the keyboard.
+
+    A Cmd+V fired while (say) Option is held becomes Cmd+Option+V and the target
+    app can swallow it (empty paste). We treat that as unsafe. On any failure to
+    read the state, assume nothing is held (do not block the paste needlessly).
+    """
+    try:
+        flags = CGEventSourceFlagsState(kCGEventSourceStateCombinedSessionState)
+    except Exception:  # noqa: BLE001
+        return False
+    return any(flags & mask for mask in _MOD_MASKS.values())
+
+
+def _wait_modifiers_released(timeout: float) -> bool:
+    """Poll until no modifier is held, or `timeout` seconds elapse.
+
+    Returns True if the keyboard is clear (safe to paste), False on timeout.
+    """
+    deadline = time.monotonic() + max(0.0, timeout)
+    while _modifiers_held():
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.02)
+    return True
+
+
+def has_accessibility() -> bool:
+    """Accessibility permission granted? (required to POST a synthetic Cmd+V).
+
+    Without it macOS DROPS the paste event silently. We check with prompt=False
+    (never trigger the system dialog from here). Returns True if the API is
+    unavailable (e.g. off-macOS test host): the paste path then behaves as before.
+    """
+    try:
+        from ApplicationServices import (
+            AXIsProcessTrustedWithOptions,
+            kAXTrustedCheckOptionPrompt,
+        )
+
+        return bool(AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: False}))
+    except Exception:  # noqa: BLE001
+        return True
 
 
 def set_clipboard(text: str) -> None:
@@ -77,24 +124,48 @@ def _send_cmd_v() -> None:
     CGEventPost(kCGHIDEventTap, up)
 
 
-def insert_at_cursor(text: str, restore: bool = True) -> None:
-    """Paste `text` wherever the cursor is.
+def insert_at_cursor(text: str, restore: bool = True) -> bool:
+    """Paste `text` wherever the cursor is. Return True if the paste was fired.
 
-    If `restore` is true (default), the previous clipboard contents are restored
-    after pasting. If false, `text` is left on the clipboard as a safety net
-    (see config.KEEP_LAST_IN_CLIPBOARD).
+    The text is ALWAYS put on the clipboard first (safety net), before any check:
+    even when we decline to paste, the dictation is never lost. We return False
+    (WITHOUT sending Cmd+V) when the paste would be unsafe or futile, so the
+    caller can fall back to a visible clipboard+notification delivery:
+      - Accessibility permission missing -> macOS drops the event silently;
+      - a modifier is still held after PASTE_MODIFIER_WAIT -> the paste would be
+        swallowed (empty paste).
+
+    If `restore` is true, the previous clipboard contents are restored after
+    pasting. If false, `text` is left on the clipboard as a safety net (see
+    config.KEEP_LAST_IN_CLIPBOARD).
     """
     if not text:
-        return
+        return False
     pb = NSPasteboard.generalPasteboard()
     before = pb.changeCount()
     previous = _get_clipboard()
-    set_clipboard(text)
+    set_clipboard(text)  # safety net FIRST: the text survives whatever follows.
     after = pb.changeCount()
     _log(
         f"clipboard set ({len(text)} chars), changeCount {before} -> {after}, "
         f"ambient modifiers: {_ambient_modifiers()}"
     )
+
+    # Accessibility is required to POST the Cmd+V; without it the event is
+    # dropped silently. Do not paste: let the caller surface it and keep the text
+    # on the clipboard for a manual Cmd+V.
+    if not has_accessibility():
+        _log("accessibility NOT granted -> skip Cmd+V (text kept on clipboard)")
+        return False
+
+    # Wait for a clean keyboard: a modifier held at paste time swallows Cmd+V.
+    if not _wait_modifiers_released(config.PASTE_MODIFIER_WAIT):
+        _log(
+            "modifiers still held after wait "
+            f"({_ambient_modifiers()}) -> skip Cmd+V (text kept on clipboard)"
+        )
+        return False
+
     # Small delay to let the clipboard propagate before pasting.
     time.sleep(0.05)
     _log(f"sending Cmd+V (ambient modifiers: {_ambient_modifiers()})")
@@ -103,6 +174,7 @@ def insert_at_cursor(text: str, restore: bool = True) -> None:
     time.sleep(0.15)
     if restore and previous is not None:
         set_clipboard(previous)
+    return True
 
 
 if __name__ == "__main__":

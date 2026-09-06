@@ -119,20 +119,46 @@ INDICATOR_CURSOR_OFFSET = (14.0, -18.0)
 KEEP_LAST_IN_CLIPBOARD = True
 
 # --- History --------------------------------------------------------------
-# Every successful transcription is logged here (one JSON line).
-HISTORY_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "history.jsonl"
-)
+# HISTORY_PATH is defined in the "User storage" section below (it lives next to
+# the API key, in Application Support): the packaged .app has NO writable folder
+# next to its code, so a module-relative path silently failed there and no
+# history was ever written — the safety net was dead in the .app.
 # Number of entries shown by default by `history.py`.
 HISTORY_DEFAULT_N = 20
+
+# --- Paste (cursor insertion) --------------------------------------------
+# Pasting sends a synthetic Cmd+V. If a modifier (Option/Cmd/Ctrl/Shift) is
+# still physically held at that instant, the target app can SWALLOW the paste
+# (empty paste). Before pasting we wait, up to this long, for all modifiers to be
+# released; past it we do NOT paste (the text stays on the clipboard and the
+# delivery falls back to a visible clipboard+notification path).
+PASTE_MODIFIER_WAIT = 1.0  # seconds
+
+# --- Empty transcription --------------------------------------------------
+# A non-trivial take that comes back with EMPTY text is almost never a real
+# silence: it is an API hiccup. We do at most this many immediate re-attempts
+# (0 = none) — never a loop — then PRESERVE the audio in UNRESOLVED_DIR and warn
+# the user, so a dictation is never silently lost.
+EMPTY_RETRY_ATTEMPTS = 1
+# Below this WAV size, an empty result is treated as a genuine (accidental) empty
+# take and dropped without noise. ~0.5 s of 16 kHz mono int16 = 16000 bytes.
+EMPTY_MIN_WAV_BYTES = 16000
 
 # --- User storage (outside the project folder) ---------------------------
 # We keep runtime data next to the API key, in Application Support (the packaged
 # .app has no writable project folder).
 import credentials  # noqa: E402  (avoids a cycle: credentials does not import config)
 
+# Every successful transcription is logged here (one JSON line). Kept in
+# Application Support (writable) so it works in the packaged .app too — a
+# module-relative path is read-only there and the history was never written.
+HISTORY_PATH = os.path.join(credentials.APP_SUPPORT_DIR, "history.jsonl")
 # Retry queue: WAVs awaiting transcription (+ .json sidecars).
 PENDING_DIR = os.path.join(credentials.APP_SUPPORT_DIR, "pending")
+# Takes whose transcription came back EMPTY (after the bounded re-attempts): the
+# audio is PRESERVED here, OUT of the auto-retry queue (never re-run in a loop),
+# until the user retries it (retry_unresolved) or it is purged by age.
+UNRESOLVED_DIR = os.path.join(credentials.APP_SUPPORT_DIR, "unresolved")
 # Custom vocabulary dictionary (one entry per line, '#' = comment). Passed as-is
 # to the API via context_bias: no extra request/credit.
 VOCAB_FILE = os.path.join(credentials.APP_SUPPORT_DIR, "vocabulary.txt")
