@@ -94,6 +94,13 @@ _warned_long = False
 on_ui_state_change = None
 
 
+# Transient flash states (the dot fades out on its own) and the monotonic time
+# after which the tick drivers restore the REAL state via _recompute_ui().
+_FLASH_STATES = ("recovered", "error", "cancelled")
+_FLASH_SECONDS = 0.6  # indicator fade (0.45 s) + margin
+_flash_until = 0.0
+
+
 def _set_ui_state(value: str) -> None:
     """Set the shared UI state and notify the UI (if a hook is wired)."""
     global _ui_state
@@ -110,10 +117,10 @@ def _recompute_ui() -> None:
     """Recompute the dot from the REAL state, by priority order.
 
     recording (tap flag) > transcribing (attempt in progress) > retrying (jobs
-    waiting for the network) > idle. The transient "cancelled" and "recovered"
-    (flash) states are set directly elsewhere and do NOT go through here (their
-    animation ends on its own; no recompute overwrites them until another event
-    happens)."""
+    waiting for the network) > idle. The transient flash states ("cancelled",
+    "recovered", "error") are set via _flash_ui(); once their fade is over,
+    tick_recording_limit() calls this again so a dot still needed (amber, blue)
+    comes back instead of staying hidden."""
     if _recording_active:
         state = "recording"
     elif transcribe_queue.active_count() > 0:
@@ -122,6 +129,18 @@ def _recompute_ui() -> None:
         state = "retrying"
     else:
         state = "idle"
+    _set_ui_state(state)
+
+
+def _flash_ui(state: str) -> None:
+    """Show a brief flash (green/orange/red fade), without hiding a recording.
+
+    Called from ANY thread (worker deliveries, keyboard tap). While a take is
+    recording, the red dot wins: no flash (the notification still informs)."""
+    global _flash_until
+    if _recording_active:
+        return
+    _flash_until = time.monotonic() + _FLASH_SECONDS
     _set_ui_state(state)
 
 
@@ -163,8 +182,12 @@ def tick_recording_limit() -> None:
         sound ONCE as a heads-up. Recording is NOT interrupted here;
       - AT the limit: auto-stop and send, so the captured audio is delivered and
         nothing said up to the limit is lost.
-    Returns immediately when idle (nothing to do outside a take)."""
+    Returns immediately when idle (nothing to do outside a take).
+
+    Also ends a finished flash: restores the real dot state (see _flash_ui)."""
     global _warned_long
+    if _ui_state in _FLASH_STATES and time.monotonic() >= _flash_until:
+        _recompute_ui()
     if not _recording_active or _recording_started_at is None:
         return
     elapsed = time.monotonic() - _recording_started_at
@@ -206,7 +229,7 @@ def _deliver_immediate(text: str) -> None:
     if not pasted:
         _log("immediate paste not fired -> visible clipboard fallback")
         set_clipboard(text)  # ensure it is on the clipboard even if restore ran
-        _set_ui_state("recovered")  # green flash (visual confirmation)
+        _flash_ui("recovered")  # green flash (visual confirmation)
         if inserter.has_accessibility():
             notices.put("Paste held back — text copied, press Cmd+V to paste")
         else:
@@ -223,8 +246,8 @@ def _deliver_deferred(text: str) -> None:
     print(f"[mistral-stt] transcription recovered ({len(text)} characters):")
     print(text)
     set_clipboard(text)
-    _set_ui_state("recovered")  # green flash (visual confirmation)
-    notices.put("Transcription recovered — on the clipboard ✅")
+    _flash_ui("recovered")  # green flash (visual confirmation)
+    notices.put("Retry succeeded ✅ — text is on the clipboard. Press Cmd+V to paste it.")
 
 
 def _deliver_error(message: str) -> None:
@@ -233,7 +256,7 @@ def _deliver_error(message: str) -> None:
     We do NOT stay blue (network wait): a bright orange flash (error dot) + a
     clear notification, then back to idle. Distinct from a mere wait."""
     print(f"[mistral-stt] definitive failure: {message}")
-    _set_ui_state("error")  # orange flash (failure, distinct from the 'waiting' blue)
+    _flash_ui("error")  # orange flash (failure, distinct from the 'waiting' blue)
     errors.put(message)
 
 
@@ -244,8 +267,21 @@ def _deliver_empty(message: str) -> None:
     in unresolved/ (retry from the menu). We flash + notify so it is never a
     silent 'nothing happened'."""
     print(f"[mistral-stt] empty transcription: {message}")
-    _set_ui_state("error")  # visible flash (needs user attention / retry)
+    _flash_ui("error")  # visible flash (needs user attention / retry)
     errors.put(message)
+
+
+def _deliver_retrying(message: str) -> None:
+    """FIRST transient failure of a job: the queue retries it in the background.
+
+    The raw error (e.g. "Try again.") would suggest the user must act; instead we
+    say it retries on its own and where the text will land (clipboard, since the
+    cursor may have moved by then). The technical detail stays in the console."""
+    print(f"[mistral-stt] transient failure, retrying: {message}")
+    errors.put(
+        "API didn't answer — retrying automatically (blue dot). "
+        "The text will go to the clipboard, not pasted."
+    )
 
 
 def _log(msg: str) -> None:
@@ -398,7 +434,7 @@ def _tap_callback(proxy, type_, event, refcon):  # noqa: ARG001
                 state = IDLE
                 _recording_active = False
                 _recording_started_at = None
-                _set_ui_state("cancelled")  # arm the confirmation flash (direct)
+                _flash_ui("cancelled")  # arm the confirmation flash
                 _actions.put("cancel")
                 return None  # swallow Esc (only during a recording)
 
@@ -435,7 +471,7 @@ def start_transcribe_worker() -> "threading.Thread | None":
     transcribe_queue.on_state_change = _recompute_ui
     transcribe_queue.deliver_immediate = _deliver_immediate
     transcribe_queue.deliver_deferred = _deliver_deferred
-    transcribe_queue.on_error = errors.put
+    transcribe_queue.on_error = _deliver_retrying
     transcribe_queue.on_permanent_error = _deliver_error
     transcribe_queue.on_empty = _deliver_empty
     # Create the vocabulary dictionary (with a help header) if it is missing.

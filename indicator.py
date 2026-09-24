@@ -1,7 +1,7 @@
 """Visual recording indicator: a small floating dot, one PER screen.
 
 On EACH monitor, a borderless, non-activating NSPanel placed at the bottom
-center (or, by default, following the cursor — see config.INDICATOR_FOLLOW_CURSOR):
+center (or following the cursor if config.INDICATOR_FOLLOW_CURSOR is True):
     red   = recording in progress
     pink-red (pulsing) = long take (reminder to wrap up; recording continues)
     amber = transcription in progress (network call)
@@ -85,6 +85,9 @@ class Indicator:
         self._panels = []        # list of (panel, view), one entry per screen
         self._screens_sig = None
         self._visible = False
+        # Bumped on every _show(): a flash's fade-out completion only hides the
+        # dot if nothing was shown since (else it would hide a new recording).
+        self._show_gen = 0
         self._pulsing = False    # opacity pulse (the "recording_long" state)
         self._color = _RED
         self._build_panels()
@@ -95,8 +98,9 @@ class Indicator:
         """Fingerprint of the screen config: we rebuild if it changes."""
         sig = []
         for s in NSScreen.screens():
-            f = s.frame()
-            sig.append((f.origin.x, f.origin.y, f.size.width, f.size.height))
+            # visibleFrame too: a Dock resize/auto-hide moves the anchor point.
+            for f in (s.frame(), s.visibleFrame()):
+                sig.append((f.origin.x, f.origin.y, f.size.width, f.size.height))
         return tuple(sig)
 
     def _make_panel(self, screen):
@@ -105,15 +109,10 @@ class Indicator:
         panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
             rect, style, NSBackingStoreBuffered, False
         )
-        # Very high level (not NSFloatingWindowLevel): essential to rise ABOVE
-        # another application's full-screen Space. Combined with the behaviors
-        # below, the dot stays visible everywhere.
-        panel.setLevel_(NSScreenSaverWindowLevel)
         panel.setOpaque_(False)
         panel.setBackgroundColor_(NSColor.clearColor())
         panel.setHasShadow_(False)
         panel.setIgnoresMouseEvents_(True)
-        panel.setFloatingPanel_(True)
         panel.setBecomesKeyOnlyIfNeeded_(True)
         panel.setHidesOnDeactivate_(False)
         panel.setCollectionBehavior_(
@@ -121,6 +120,11 @@ class Indicator:
             | NSWindowCollectionBehaviorStationary
             | NSWindowCollectionBehaviorFullScreenAuxiliary
         )
+        # Very high level (not NSFloatingWindowLevel): essential to rise ABOVE
+        # another application's full-screen Space. Set LAST, and never call
+        # setFloatingPanel_: it silently resets the level to NSFloatingWindowLevel
+        # (3), which buried the dot under full-screen apps and other Spaces.
+        panel.setLevel_(NSScreenSaverWindowLevel)
 
         view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, _SIZE, _SIZE))
         view.setWantsLayer_(True)
@@ -169,6 +173,7 @@ class Indicator:
             panel.setAlphaValue_(1.0)
             panel.orderFrontRegardless()
         self._visible = True
+        self._show_gen += 1
 
     def _hide(self) -> None:
         for panel, _ in self._panels:
@@ -182,9 +187,13 @@ class Indicator:
         Red by default (cancel); green for a recovered transcription."""
         self._set_color(color)
         self._show()
+        gen = self._show_gen
 
         def _done() -> None:
-            self._hide()
+            # Stale fade: a new state (e.g. a new recording) was shown during
+            # the animation -> leave it visible.
+            if self._show_gen == gen:
+                self._hide()
 
         NSAnimationContext.beginGrouping()
         NSAnimationContext.currentContext().setDuration_(_FADE_SECONDS)

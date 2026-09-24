@@ -480,10 +480,10 @@ class AppDelegate(NSObject):
                 self._keytest_result = None
 
         # Adaptive cadence: fast during recording/transcription (the dot is
-        # re-asserted to the front often), slow otherwise. NB: the "cancelled" and
-        # "recovered" states stay stuck after their flash (the animation ends on
-        # its own via Core Animation), so we do NOT count them as active, or we
-        # would stay on the fast cadence forever. "retrying" (network wait) can
+        # re-asserted to the front often), slow otherwise. NB: the flash states
+        # ("cancelled", "recovered", "error") fade out on their own via Core
+        # Animation, then tick_recording_limit() restores the real state; we do
+        # NOT count them as active. "retrying" (network wait) can
         # last a long time: we leave it on the IDLE cadence too (0.75 s is enough
         # to re-assert the front; avoids a permanent 10 Hz). The menu refreshes
         # when it opens (menuNeedsUpdate:).

@@ -38,12 +38,16 @@ Keep the floating dot in frame so the recording state is visible.
   pasted).
 - The **left Option key stays free** so you can still type accents (é, è, ç...).
 
-A small **floating dot follows your cursor** while in use, so it's always where
-you're looking, on the active window: **red** = recording, **amber** =
-transcribing, **hidden** = idle. On cancel it flashes red and fades out. It
-stays visible across all Spaces, including over full-screen apps. (Set
-`INDICATOR_FOLLOW_CURSOR = False` in `config.py` to pin it at the bottom center
-instead.)
+A small **floating dot** sits at the bottom center of **every screen** while in
+use: **red** = recording, **amber** = transcribing, **blue** = waiting to retry
+(network), **hidden** = idle. On cancel it flashes red and fades out. It stays
+visible across all Spaces, including over full-screen apps. It never follows
+the mouse: whichever screen you work on, its dot is already there.
+
+If a transcription fails on a network or API hiccup, you get a notification and
+the dot turns blue: the app **retries on its own**. When the retry succeeds, the
+dot flashes green and a notification says so. The text is then **on the
+clipboard, not pasted** (your cursor may have moved): press **Cmd+V**.
 
 A single take has a **recording limit**. It defaults to **10 minutes** to keep
 memory low and is adjustable up to **60 minutes** (the Mistral Voxtral API's own
@@ -316,9 +320,9 @@ mistral_stt.py`), which is more reliable under launchd than `uv run`. Logs go to
   certificate in certificate chain`** → you are on a managed network behind a
   TLS-inspecting proxy. See [Behind a corporate proxy](#behind-a-corporate-proxy-ssl-errors)
   below.
-- **The dot does not appear (multi-monitor)** → the indicator now anchors itself
-  just above the Dock, on the screen that has the Dock. If you hid the Dock or
-  want a different spot, tweak `_MARGIN_BOTTOM` / `_SIZE` in `indicator.py`.
+- **The dot does not appear (multi-monitor)** → there is one dot per screen,
+  just above the bottom of each screen's visible area (above the Dock). To move
+  it, tweak `_MARGIN_BOTTOM` / `_SIZE` in `indicator.py`.
 
 When in doubt, run in debug mode for more detail:
 
