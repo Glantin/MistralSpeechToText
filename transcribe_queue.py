@@ -8,7 +8,9 @@ audio was lost (temp WAV deleted, no retry). Here:
   - each take is written to DISK (PENDING_DIR) before transcription, so it is
     kept until a transcript is obtained — even after an app restart
     (recover_pending);
-  - on failure, we RETRY in the background with a capped back-off, until success.
+  - on failure, we RETRY in the background, at most RETRY_MAX_ATTEMPTS times;
+    then the audio moves to UNRESOLVED_DIR (kept, retried only on demand from
+    the menu): never an endless loop.
 
 Delivery (callbacks injected by mistral_stt.py):
   - success on the first try (never deferred) -> deliver_immediate (paste at cursor);
@@ -26,15 +28,18 @@ import threading
 import time
 import uuid
 
+import applog
 import config
 import history
 import transcribe as _transcribe
 
-# Debug logging, gated by the same env var as mistral_stt (silent otherwise).
+# Debug echo on the console, gated by the same env var as mistral_stt. The log
+# FILE (applog) always gets the line.
 _DEBUG = bool(os.environ.get("MISTRAL_STT_DEBUG"))
 
 
 def _log(msg: str) -> None:
+    applog.log(f"queue: {msg}")
     if _DEBUG:
         print(f"[transcribe_queue:debug] {msg}")
 
@@ -127,9 +132,10 @@ def _wav_size(wav: str) -> int:
 def _move_to_unresolved(jobid: str) -> None:
     """Preserve a job's WAV in UNRESOLVED_DIR and drop it from the queue.
 
-    Used when a transcription keeps coming back EMPTY: the audio is kept (never
-    lost) but OUT of the auto-retry queue, so it is never re-run in a loop. The
-    user re-runs it on demand via retry_unresolved()."""
+    Used when a transcription keeps coming back EMPTY, or is GIVEN UP (permanent
+    error / attempt cap): the audio is kept (never lost) but OUT of the
+    auto-retry queue, so it is never re-run in a loop. The user re-runs it on
+    demand via retry_unresolved()."""
     meta = _jobs.pop(jobid, None)
     wav = meta["wav_path"] if meta else _wav_path(jobid)
     try:
@@ -222,6 +228,14 @@ def recover_pending() -> int:
             meta["next_try_ts"] = now  # retry right away on startup
         except (OSError, ValueError):
             pass
+        # Attempt cap already reached (e.g. the app was killed mid-give-up):
+        # never resume the loop, keep the audio for a manual retry.
+        if meta["attempts"] >= config.RETRY_MAX_ATTEMPTS:
+            with _cond:
+                _jobs[jobid] = meta
+                _move_to_unresolved(jobid)
+            _log(f"recovered job {jobid} already at attempt cap -> unresolved/")
+            continue
         # Purge takes that are too old.
         if now - meta["created_ts"] > config.PENDING_MAX_AGE_SECONDS:
             for p in (wav, _sidecar_path(jobid)):
@@ -342,114 +356,140 @@ def _run() -> None:
             meta = _jobs[jobid]
             wav = meta["wav_path"]
             _active_jobid = jobid
-        _log(f"picked job {jobid} ({wav}) -> transcribing (amber)")
-        _notify_state()  # -> amber dot (transcription in progress)
-
-        # Network call OUTSIDE the lock (blocking, bounded by the HTTP timeout).
-        text = None
-        ok = False
-        err_msg = None
-        retriable = True
         try:
-            text = _transcribe.transcribe(wav)
-            ok = True
+            _attempt(jobid, wav)
         except Exception as exc:  # noqa: BLE001
-            err_msg = _transcribe.classify_error(exc)[1]
-            retriable = _transcribe.is_retriable(exc)
-
-        first_failure = False
-        gave_up = False
-        empty_retry = False
-        empty_preserved = False
-        with _cond:
-            _active_jobid = None
-            if ok:
-                ever_deferred = _jobs.get(jobid, {}).get("ever_deferred", False)
-                if text:
-                    _remove_job(jobid)
-                else:
-                    # EMPTY transcription. A tiny take is a genuine (accidental)
-                    # empty -> drop quietly. A non-trivial take almost never is:
-                    # do at most EMPTY_RETRY_ATTEMPTS immediate re-attempts (never
-                    # a loop), then PRESERVE the audio so it is never lost.
-                    m = _jobs.get(jobid)
-                    trivial = _wav_size(wav) < config.EMPTY_MIN_WAV_BYTES
-                    if m is None or trivial:
-                        _remove_job(jobid)
-                    else:
-                        m["empty_attempts"] = m.get("empty_attempts", 0) + 1
-                        if m["empty_attempts"] <= config.EMPTY_RETRY_ATTEMPTS:
-                            m["next_try_ts"] = time.time()  # bounded immediate retry
-                            _write_sidecar(jobid, m)
-                            empty_retry = True
-                        else:
-                            _move_to_unresolved(jobid)
-                            empty_preserved = True
-            else:
+            # Never let this thread die silently: drop the active mark, keep the
+            # job (it is retried on its schedule, bounded by the attempt cap).
+            _log(f"job {jobid} unexpected error: {exc!r}")
+            with _cond:
+                _active_jobid = None
                 m = _jobs.get(jobid)
                 if m is not None:
-                    m["attempts"] += 1
-                    first_failure = m["attempts"] == 1
-                    m["ever_deferred"] = True
-                    # Give up if the error is PERMANENT (400/401/422...: retrying
-                    # cannot help and would leave the dot blue forever) or if the
-                    # transient-attempt cap is reached. Otherwise reschedule with
-                    # back-off.
-                    if not retriable or m["attempts"] >= config.RETRY_MAX_ATTEMPTS:
-                        gave_up = True
-                        _remove_job(jobid)
-                    else:
-                        m["next_try_ts"] = time.time() + _backoff_for(m["attempts"])
-                        _write_sidecar(jobid, m)
-        _notify_state()  # -> idle / blue (depending on remaining jobs)
+                    m["attempts"] = m.get("attempts", 0) + 1
+                    m["next_try_ts"] = time.time() + _backoff_for(m["attempts"])
+                    if m["attempts"] >= config.RETRY_MAX_ATTEMPTS:
+                        _move_to_unresolved(jobid)
+            _notify_state()
 
+
+def _attempt(jobid: str, wav: str) -> None:
+    """One transcription attempt for a job already marked active (_active_jobid),
+    then its outcome: deliver, reschedule, or give up (audio kept)."""
+    global _active_jobid
+    _log(f"picked job {jobid} ({wav}) -> transcribing (amber)")
+    _notify_state()  # -> amber dot (transcription in progress)
+
+    # Network call OUTSIDE the lock (blocking, bounded by the HTTP timeout).
+    text = None
+    ok = False
+    err_msg = None
+    retriable = True
+    try:
+        text = _transcribe.transcribe(wav)
+        ok = True
+    except Exception as exc:  # noqa: BLE001
+        err_msg = _transcribe.classify_error(exc)[1]
+        retriable = _transcribe.is_retriable(exc)
+        _log(
+            f"job {jobid} attempt failed: {type(exc).__name__} "
+            f"status={_transcribe.http_status(exc)} retriable={retriable}"
+        )
+
+    first_failure = False
+    gave_up = False
+    empty_retry = False
+    empty_preserved = False
+    with _cond:
+        _active_jobid = None
         if ok:
-            _log(
-                f"job {jobid} transcribed ok: {len(text or '')} chars, "
-                f"deferred={ever_deferred}"
-            )
+            ever_deferred = _jobs.get(jobid, {}).get("ever_deferred", False)
             if text:
-                # Log BEFORE delivery: the trace exists no matter what.
-                try:
-                    history.append(text)
-                except Exception:  # noqa: BLE001
-                    pass
-                cb = deliver_deferred if ever_deferred else deliver_immediate
-                _log(
-                    "delivering via "
-                    + ("deliver_deferred (clipboard)" if ever_deferred
-                       else "deliver_immediate (paste)")
-                )
-                if cb is not None:
-                    try:
-                        cb(text)
-                    except Exception:  # noqa: BLE001
-                        pass
-            elif empty_retry:
-                _log(f"job {jobid} empty -> bounded immediate re-attempt")
-            elif empty_preserved:
-                _log(f"job {jobid} empty -> preserved in unresolved/ (audio kept)")
-                cb = on_empty or on_permanent_error or on_error
-                if cb is not None:
-                    try:
-                        cb("Empty transcription — audio kept, retry from the 🎙 menu")
-                    except Exception:  # noqa: BLE001
-                        pass
-            # trivial empty take: nothing to deliver (job already removed).
-        elif gave_up:
-            # DEFINITIVE failure (job removed): we report it every time (it is a
-            # give-up, not a mere wait) via on_permanent_error -> error flash +
-            # notification. Fall back to on_error if not wired.
-            cb = on_permanent_error or on_error
-            if err_msg and cb is not None:
-                try:
-                    cb(err_msg)
-                except Exception:  # noqa: BLE001
-                    pass
-        elif first_failure and err_msg and on_error is not None:
-            # First TRANSIENT failure only (not every retry, to avoid spam).
-            # The retry continues in the background; the dot stays blue.
+                _remove_job(jobid)
+            else:
+                # EMPTY transcription. A tiny take is a genuine (accidental)
+                # empty -> drop quietly. A non-trivial take almost never is:
+                # do at most EMPTY_RETRY_ATTEMPTS immediate re-attempts (never
+                # a loop), then PRESERVE the audio so it is never lost.
+                m = _jobs.get(jobid)
+                trivial = _wav_size(wav) < config.EMPTY_MIN_WAV_BYTES
+                if m is None or trivial:
+                    _remove_job(jobid)
+                else:
+                    m["empty_attempts"] = m.get("empty_attempts", 0) + 1
+                    if m["empty_attempts"] <= config.EMPTY_RETRY_ATTEMPTS:
+                        m["next_try_ts"] = time.time()  # bounded immediate retry
+                        _write_sidecar(jobid, m)
+                        empty_retry = True
+                    else:
+                        _move_to_unresolved(jobid)
+                        empty_preserved = True
+        else:
+            m = _jobs.get(jobid)
+            if m is not None:
+                m["attempts"] += 1
+                first_failure = m["attempts"] == 1
+                m["ever_deferred"] = True
+                # Give up if the error is PERMANENT (400/401/422...: retrying
+                # cannot help) or if the attempt cap is reached. The audio is
+                # KEPT in unresolved/ (manual retry from the menu), never
+                # re-run automatically. Otherwise reschedule with back-off.
+                if not retriable or m["attempts"] >= config.RETRY_MAX_ATTEMPTS:
+                    gave_up = True
+                    _move_to_unresolved(jobid)
+                else:
+                    m["next_try_ts"] = time.time() + _backoff_for(m["attempts"])
+                    _write_sidecar(jobid, m)
+    _notify_state()  # -> idle / blue (depending on remaining jobs)
+
+    if ok:
+        _log(
+            f"job {jobid} transcribed ok: {len(text or '')} chars, "
+            f"deferred={ever_deferred}"
+        )
+        if text:
+            # Log BEFORE delivery: the trace exists no matter what.
             try:
-                on_error(err_msg)
+                history.append(text)
             except Exception:  # noqa: BLE001
                 pass
+            cb = deliver_deferred if ever_deferred else deliver_immediate
+            _log(
+                "delivering via "
+                + ("deliver_deferred (clipboard)" if ever_deferred
+                   else "deliver_immediate (paste)")
+            )
+            if cb is not None:
+                try:
+                    cb(text)
+                except Exception:  # noqa: BLE001
+                    pass
+        elif empty_retry:
+            _log(f"job {jobid} empty -> bounded immediate re-attempt")
+        elif empty_preserved:
+            _log(f"job {jobid} empty -> preserved in unresolved/ (audio kept)")
+            cb = on_empty or on_permanent_error or on_error
+            if cb is not None:
+                try:
+                    cb("Empty transcription — audio kept, retry from the 🎙 menu")
+                except Exception:  # noqa: BLE001
+                    pass
+        # trivial empty take: nothing to deliver (job already removed).
+    elif gave_up:
+        # DEFINITIVE failure (audio kept in unresolved/): we report it every
+        # time (it is a give-up, not a mere wait) via on_permanent_error ->
+        # error flash + notification. Fall back to on_error if not wired.
+        _log(f"job {jobid} given up -> unresolved/ (audio kept)")
+        cb = on_permanent_error or on_error
+        if err_msg and cb is not None:
+            try:
+                cb(f"{err_msg} — audio kept, retry from the 🎙 menu")
+            except Exception:  # noqa: BLE001
+                pass
+    elif first_failure and err_msg and on_error is not None:
+        # First TRANSIENT failure only (not every retry, to avoid spam).
+        # The retry continues in the background; the dot stays blue.
+        try:
+            on_error(err_msg)
+        except Exception:  # noqa: BLE001
+            pass

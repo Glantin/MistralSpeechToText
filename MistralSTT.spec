@@ -13,7 +13,7 @@ mises a jour de Python.
 
 import os
 
-VERSION = "0.2.4"
+VERSION = "0.2.5"
 _icon = "assets/AppIcon.icns"
 ICON = _icon if os.path.exists(_icon) else None
 

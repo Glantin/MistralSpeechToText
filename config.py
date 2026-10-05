@@ -50,24 +50,25 @@ MISTRAL_MODEL = "voxtral-mini-latest"
 MISTRAL_LANGUAGE = None
 
 # --- Network / HTTP timeouts ---------------------------------------------
-# Without an explicit timeout, a network change/loss leaves the request HANGING
-# indefinitely: the transcription thread stays blocked and the dot freezes. So
-# we bound the call.
-#   - short CONNECT: a dead network fails fast -> we switch to retry;
-#   - generous READ: covers the upload + transcription of a long audio.
-HTTP_CONNECT_TIMEOUT = 10.0   # seconds
-HTTP_READ_TIMEOUT = 180.0     # seconds
+# Without an explicit timeout, a network change/loss leaves the request HANGING:
+# the dot stays amber. The Mistral SDK applies its OWN per-request timeout
+# (300 s by default, for every phase, overriding the httpx client's), so we pass
+# one explicitly on each call (transcribe.request_timeout_seconds):
+#   - HTTP_READ_TIMEOUT for a normal take;
+#   - up to HTTP_READ_TIMEOUT_MAX for a long take (upload + transcription).
+HTTP_CONNECT_TIMEOUT = 10.0   # seconds (httpx client default)
+HTTP_READ_TIMEOUT = 60.0      # seconds
+HTTP_READ_TIMEOUT_MAX = 180.0  # seconds
 
 # --- Retry (persistent queue) --------------------------------------------
-# When a transcription fails (network), the WAV is NOT dropped: it is kept and
-# retried in the background on this back-off (seconds; the last value is then
-# repeated), until success. So a long take is never lost, even after an app
-# restart.
-RETRY_BACKOFF_SECONDS = [2, 5, 15, 30, 60, 120, 300]
-# Cap on TRANSIENT attempts: past it we give up even on network (anti-loop
-# guard-rail, on top of max age). A PERMANENT error (400/401/422...) is given up
-# on the very first attempt (see transcribe_queue).
-RETRY_MAX_ATTEMPTS = 12
+# When a transcription fails (network), the WAV is kept and retried in the
+# background on this back-off (seconds; the last value is then repeated).
+RETRY_BACKOFF_SECONDS = [5, 15]
+# Cap on attempts: past it we STOP retrying (never a loop). The audio is moved to
+# UNRESOLVED_DIR, retried only on demand from the 🎙 menu. A PERMANENT error
+# (400/401/422...) is given up on the very first attempt, audio kept the same way.
+# Worst case: 3 x HTTP_READ_TIMEOUT + 20 s of waits (~3 min 20).
+RETRY_MAX_ATTEMPTS = 3
 # Past this age, a pending job is purged (anti-accumulation guard-rail).
 PENDING_MAX_AGE_SECONDS = 7 * 24 * 3600  # 7 days
 

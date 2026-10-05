@@ -94,3 +94,86 @@ def test_purge_unresolved_drops_old(tmp_path, monkeypatch):
 
     assert transcribe_queue.purge_unresolved() == 1
     assert not os.path.exists(old)
+
+
+# --- Attempt cap: never an endless loop, audio kept -----------------------
+
+class _Transient(Exception):
+    status_code = 503
+
+
+class _Permanent(Exception):
+    status_code = 401
+
+
+def _register_job(jobid, attempts=0):
+    wav = transcribe_queue._wav_path(jobid)
+    with open(wav, "wb") as f:
+        f.write(b"RIFF" + b"\0" * 20000)
+    transcribe_queue._jobs[jobid] = {
+        "wav_path": wav,
+        "created_ts": __import__("time").time(),
+        "attempts": attempts,
+        "next_try_ts": 0,
+        "ever_deferred": False,
+    }
+    return wav
+
+
+def _failing_transcribe(monkeypatch, exc_cls):
+    def _boom(path):  # noqa: ARG001
+        raise exc_cls("fail")
+
+    monkeypatch.setattr(transcribe_queue._transcribe, "transcribe", _boom)
+
+
+def test_gives_up_after_max_attempts_and_keeps_audio(tmp_path, monkeypatch):
+    _point_dirs(tmp_path, monkeypatch)
+    monkeypatch.setattr(transcribe_queue, "_notify_state", lambda: None)
+    errors = []
+    monkeypatch.setattr(transcribe_queue, "on_error", lambda m: None)
+    monkeypatch.setattr(transcribe_queue, "on_permanent_error", errors.append)
+    _failing_transcribe(monkeypatch, _Transient)
+    transcribe_queue._jobs.clear()
+    wav = _register_job("job-cap")
+
+    for _ in range(config.RETRY_MAX_ATTEMPTS):
+        assert "job-cap" in transcribe_queue._jobs  # still retrying
+        transcribe_queue._attempt("job-cap", wav)
+
+    assert config.RETRY_MAX_ATTEMPTS == 3
+    assert transcribe_queue._jobs == {}  # no more automatic retries
+    assert (tmp_path / "unresolved" / "job-cap.wav").exists()
+    assert len(errors) == 1 and "audio kept" in errors[0]
+
+
+def test_permanent_error_gives_up_at_once_and_keeps_audio(tmp_path, monkeypatch):
+    _point_dirs(tmp_path, monkeypatch)
+    monkeypatch.setattr(transcribe_queue, "_notify_state", lambda: None)
+    monkeypatch.setattr(transcribe_queue, "on_permanent_error", lambda m: None)
+    _failing_transcribe(monkeypatch, _Permanent)
+    transcribe_queue._jobs.clear()
+    wav = _register_job("job-401")
+
+    transcribe_queue._attempt("job-401", wav)
+
+    assert transcribe_queue._jobs == {}
+    assert (tmp_path / "unresolved" / "job-401.wav").exists()
+
+
+def test_recover_pending_does_not_resume_capped_job(tmp_path, monkeypatch):
+    import json
+    import time
+
+    pending, unresolved = _point_dirs(tmp_path, monkeypatch)
+    monkeypatch.setattr(transcribe_queue, "_notify_state", lambda: None)
+    transcribe_queue._jobs.clear()
+    (pending / "job-old.wav").write_bytes(b"RIFFfake-audio")
+    (pending / "job-old.json").write_text(
+        json.dumps({"created_ts": time.time(), "attempts": config.RETRY_MAX_ATTEMPTS})
+    )
+
+    assert transcribe_queue.recover_pending() == 0
+    assert transcribe_queue._jobs == {}
+    assert (unresolved / "job-old.wav").exists()
+    assert not (pending / "job-old.json").exists()

@@ -53,6 +53,7 @@ from ApplicationServices import (
 from Foundation import NSBundle
 from Quartz import CGPreflightListenEventAccess, CGRequestListenEventAccess
 
+import applog
 import config
 import credentials
 import mistral_stt as core
@@ -190,6 +191,11 @@ class AppDelegate(NSObject):
         # brings the Cmd+C/V/X/A shortcuts to the API-key input field; without
         # this menu, Cmd+V does not paste).
         self._install_main_menu()
+
+        version = NSBundle.mainBundle().objectForInfoDictionaryKey_(
+            "CFBundleShortVersionString"
+        )
+        applog.log(f"app: started v{version} ({core.runtime_arch()})")
 
         # Shared core: recording worker + transcription worker (separate thread,
         # persistent retry queue) + (attempt at) the event tap.
@@ -361,10 +367,10 @@ class AppDelegate(NSObject):
         menu.addItem_(
             self._mk_item("Recording limit…", b"setRecordLimit:")
         )
-        # Shown only when takes are preserved after an empty transcription (see
+        # Shown only when takes are preserved after a failed transcription (see
         # _refresh_menu): re-runs them so a dictation is never lost.
         self._retry_item = self._mk_item(
-            "Retry empty transcriptions", b"retryUnresolved:"
+            "Retry failed transcriptions", b"retryUnresolved:"
         )
         self._retry_item.setHidden_(True)
         menu.addItem_(self._retry_item)
@@ -409,7 +415,7 @@ class AppDelegate(NSObject):
             u = 0
         self._retry_item.setHidden_(u == 0)
         if u:
-            self._retry_item.setTitle_(f"Retry empty transcriptions ({u})")
+            self._retry_item.setTitle_(f"Retry failed transcriptions ({u})")
 
     # --- Main timer ---
     @objc.python_method
@@ -555,13 +561,13 @@ class AppDelegate(NSObject):
         _notify(f"Recording limit set to {stored} min (applies to the next take).")
 
     def retryUnresolved_(self, sender):  # noqa: N802, ARG002
-        """Re-queue takes preserved after an empty transcription (never lost)."""
+        """Re-queue takes preserved after a failed/empty transcription (never lost)."""
         n = core.retry_unresolved()
         self._refresh_menu()
         if n:
             _notify(f"{n} take(s) re-queued for transcription.")
         else:
-            _notify("No empty takes to retry.")
+            _notify("No failed takes to retry.")
 
     def toggleLogin_(self, sender):  # noqa: N802, ARG002
         ok, msg = set_login_enabled(not login_enabled())
@@ -570,10 +576,21 @@ class AppDelegate(NSObject):
         self._refresh_menu()
 
     def quitApp_(self, sender):  # noqa: N802, ARG002
-        try:
-            core.recorder.stop()
-        except Exception:  # noqa: BLE001
-            pass
+        # Never touch CoreAudio on the main thread: a wedged stream used to
+        # freeze Quit forever (menu dead, icon stuck in the menu bar). The stop
+        # runs on a disposable thread; we wait at most 1 s for it.
+        def _stop() -> None:
+            try:
+                core.recorder.stop()
+            except Exception:  # noqa: BLE001
+                pass
+
+        t = threading.Thread(target=_stop, daemon=True)
+        t.start()
+        t.join(1.0)
+        # Safety net: if terminate_ is held up (CoreAudio teardown at exit...),
+        # hard-exit so the app never lingers half-dead.
+        threading.Timer(3.0, lambda: os._exit(0)).start()
         NSApplication.sharedApplication().terminate_(self)
 
     # --- Onboarding (a simple window) ---

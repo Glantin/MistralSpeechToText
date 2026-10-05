@@ -44,11 +44,12 @@ from Quartz import (
     kCGSessionEventTap,
 )
 
+import applog
 import config
 import inserter
 import settings
 import transcribe_queue
-from audio import Recorder, list_input_devices
+from audio import MicUnavailable, Recorder, list_input_devices
 from inserter import insert_at_cursor, set_clipboard
 
 DEBUG = bool(os.environ.get("MISTRAL_STT_DEBUG"))
@@ -285,6 +286,7 @@ def _deliver_retrying(message: str) -> None:
 
 
 def _log(msg: str) -> None:
+    applog.log(f"core: {msg}")
     if DEBUG:
         print(f"[mistral-stt:debug] {msg}")
 
@@ -329,45 +331,79 @@ def _worker() -> None:
     stream...), macOS disables the tap and no more events arrive (including the
     release). So we offload recording here. Transcription lives on yet another
     thread (transcribe_queue): we ENQUEUE the take and return immediately.
+
+    This thread must NEVER die: an uncaught exception used to kill it silently
+    (red dot on press, but nothing recorded until the app was restarted).
     """
     while True:
         action = _actions.get()
         if action == "__quit__":
             return
-        if action == "start":
+        try:
+            _run_action(action)
+        except Exception as exc:  # noqa: BLE001
+            _log(f"worker: action {action!r} failed: {exc!r}")
+            if action == "start":
+                _mic_failed(exc)
+
+
+def _mic_failed(exc: Exception) -> None:
+    """The mic could not be opened: back to IDLE and tell the user."""
+    global state, _recording_active, _recording_started_at
+    state = IDLE
+    _recording_active = False
+    _recording_started_at = None
+    _recompute_ui()
+    print(f"[mistral-stt] microphone unavailable: {exc}")
+    if recorder.wedged:
+        errors.put("Microphone stuck in macOS — quit and relaunch MistralSTT")
+    else:
+        errors.put("Microphone unavailable — try again in a moment")
+
+
+def _run_action(action: str) -> None:
+    if action == "start":
+        if state == IDLE:
+            # Released (or cancelled) before the worker got here: nothing to open.
+            return
+        try:
             recorder.start()
-            _play(config.SOUND_START)
-            print("[mistral-stt] recording...")
-        elif action == "cancel":
-            # Cancel (Esc): drop the take, without transcribing or pasting.
-            wav_path = recorder.stop()
-            if wav_path:
-                try:
-                    os.remove(wav_path)
-                except OSError:
-                    pass
-            print("[mistral-stt] cancelled")
-            # The visual flash was already armed by the callback (_ui_state).
-        elif action == "stop":
-            wav_path = recorder.stop()
-            _play(config.SOUND_DONE)
-            if not wav_path:
-                _log("stop -> recorder returned no WAV (empty/too-short take)")
-                print("[mistral-stt] (nothing to transcribe)")
-                _recompute_ui()
-                continue
-            if DEBUG:
-                try:
-                    size = os.path.getsize(wav_path)
-                except OSError:
-                    size = -1
-                _log(f"stop -> WAV {wav_path} ({size} bytes) -> enqueue")
-            # We ENQUEUE the take (separate transcription thread + persistent
-            # retry). Transcription no longer blocks this worker: a slow/dropped
-            # network call no longer prevents a new recording, and the audio is
-            # kept on disk until a transcript is obtained.
-            print("[mistral-stt] transcription in progress...")
-            transcribe_queue.enqueue(wav_path)
+        except MicUnavailable as exc:
+            _mic_failed(exc)
+            return
+        _log("take started")
+        _play(config.SOUND_START)
+        print("[mistral-stt] recording...")
+    elif action == "cancel":
+        # Cancel (Esc): drop the take, without transcribing or pasting.
+        wav_path = recorder.stop()
+        if wav_path:
+            try:
+                os.remove(wav_path)
+            except OSError:
+                pass
+        _log("take cancelled")
+        print("[mistral-stt] cancelled")
+        # The visual flash was already armed by the callback (_ui_state).
+    elif action == "stop":
+        wav_path = recorder.stop()
+        _play(config.SOUND_DONE)
+        if not wav_path:
+            _log("stop -> recorder returned no WAV (empty/too-short take)")
+            print("[mistral-stt] (nothing to transcribe)")
+            _recompute_ui()
+            return
+        try:
+            size = os.path.getsize(wav_path)
+        except OSError:
+            size = -1
+        _log(f"stop -> WAV ({size} bytes) -> enqueue")
+        # We ENQUEUE the take (separate transcription thread + persistent
+        # retry). Transcription no longer blocks this worker: a slow/dropped
+        # network call no longer prevents a new recording, and the audio is
+        # kept on disk until a transcript is obtained.
+        print("[mistral-stt] transcription in progress...")
+        transcribe_queue.enqueue(wav_path)
 
 
 def _tap_callback(proxy, type_, event, refcon):  # noqa: ARG001
@@ -487,7 +523,7 @@ def start_transcribe_worker() -> "threading.Thread | None":
 def recover_pending() -> int:
     """Resume the pending takes left by a previous session.
 
-    Also purges preserved (empty) takes that are too old. If any preserved take
+    Also purges preserved (failed/empty) takes that are too old. If any preserved take
     remains, surfaces a one-off notice so the user can retry it (menu / CLI)."""
     n = transcribe_queue.recover_pending()
     try:
@@ -495,7 +531,7 @@ def recover_pending() -> int:
         u = transcribe_queue.unresolved_count()
         if u:
             notices.put(
-                f"{u} take(s) with empty transcription kept — retry from the 🎙 menu"
+                f"{u} failed take(s) kept — retry from the 🎙 menu"
             )
     except Exception:  # noqa: BLE001
         pass
@@ -503,7 +539,7 @@ def recover_pending() -> int:
 
 
 def retry_unresolved() -> int:
-    """Re-enqueue the preserved (empty) takes for a fresh attempt."""
+    """Re-enqueue the preserved (failed/empty) takes for a fresh attempt."""
     return transcribe_queue.retry_unresolved()
 
 

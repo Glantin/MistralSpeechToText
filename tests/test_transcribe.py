@@ -91,3 +91,19 @@ def test_valid_bias_term_rejects_spaces_and_internal_commas():
 
 def test_valid_bias_term_strips_edge_commas():
     assert transcribe._valid_bias_term("Mistral,") == "Mistral"
+
+
+def test_request_timeout_scales_with_take_length(tmp_path):
+    import config
+
+    bps = config.SAMPLE_RATE * config.CHANNELS * 2
+    short = tmp_path / "short.wav"
+    short.write_bytes(b"\0" * (bps * 5))  # 5 s
+    medium = tmp_path / "medium.wav"
+    medium.write_bytes(b"\0" * (bps * 120))  # 2 min
+    long_ = tmp_path / "long.wav"
+    long_.write_bytes(b"\0" * (bps * 600))  # 10 min
+
+    assert transcribe.request_timeout_seconds(str(short)) == config.HTTP_READ_TIMEOUT
+    assert transcribe.request_timeout_seconds(str(medium)) == 120
+    assert transcribe.request_timeout_seconds(str(long_)) == config.HTTP_READ_TIMEOUT_MAX

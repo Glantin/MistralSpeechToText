@@ -307,8 +307,25 @@ def transcribe(wav_path: str) -> str:
         terms = load_context_bias()
         if terms:
             kwargs["context_bias"] = terms
+        # Explicit per-request timeout: the SDK otherwise forces 300 s on every
+        # phase, overriding the httpx client's timeout.
+        kwargs["timeout_ms"] = int(request_timeout_seconds(wav_path) * 1000)
         resp = client.audio.transcriptions.complete(**kwargs)
     return (resp.text or "").strip()
+
+
+def request_timeout_seconds(wav_path: str) -> float:
+    """Timeout for one transcription request, scaled to the take's length.
+
+    HTTP_READ_TIMEOUT for a normal take; one second per second of audio for a
+    long one (slow upload + transcription), capped at HTTP_READ_TIMEOUT_MAX."""
+    try:
+        size = os.path.getsize(wav_path)
+    except OSError:
+        size = 0
+    # 16-bit samples: bytes per second of audio.
+    duration = size / (config.SAMPLE_RATE * config.CHANNELS * 2)
+    return min(max(config.HTTP_READ_TIMEOUT, duration), config.HTTP_READ_TIMEOUT_MAX)
 
 
 if __name__ == "__main__":
