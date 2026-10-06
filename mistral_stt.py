@@ -523,24 +523,17 @@ def start_transcribe_worker() -> "threading.Thread | None":
 def recover_pending() -> int:
     """Resume the pending takes left by a previous session.
 
-    Also purges preserved (failed/empty) takes that are too old. If any preserved take
-    remains, surfaces a one-off notice so the user can retry it (menu / CLI)."""
+    Also purges preserved (failed/empty) takes that are too old. If any preserved
+    take remains, surfaces a one-off notice so the user can retry it (menu)."""
     n = transcribe_queue.recover_pending()
     try:
         transcribe_queue.purge_unresolved()
         u = transcribe_queue.unresolved_count()
         if u:
-            notices.put(
-                f"{u} failed take(s) kept — retry from the 🎙 menu"
-            )
+            notices.put(f"{u} failed dictation(s) kept — see the 🎙 menu")
     except Exception:  # noqa: BLE001
         pass
     return n
-
-
-def retry_unresolved() -> int:
-    """Re-enqueue the preserved (failed/empty) takes for a fresh attempt."""
-    return transcribe_queue.retry_unresolved()
 
 
 def preflight_key_check() -> None:

@@ -129,19 +129,32 @@ def _wav_size(wav: str) -> int:
         return 0
 
 
-def _move_to_unresolved(jobid: str) -> None:
+def _unresolved_wav(jobid: str) -> str:
+    return os.path.join(config.UNRESOLVED_DIR, f"{jobid}.wav")
+
+
+def _unresolved_sidecar(jobid: str) -> str:
+    return os.path.join(config.UNRESOLVED_DIR, f"{jobid}.json")
+
+
+def _move_to_unresolved(jobid: str, reason: str = "other") -> None:
     """Preserve a job's WAV in UNRESOLVED_DIR and drop it from the queue.
 
     Used when a transcription keeps coming back EMPTY, or is GIVEN UP (permanent
     error / attempt cap): the audio is kept (never lost) but OUT of the
     auto-retry queue, so it is never re-run in a loop. The user re-runs it on
-    demand via retry_unresolved()."""
+    demand from the menu (retry_unresolved_one).
+
+    A small sidecar keeps WHEN the take was recorded and WHY it failed
+    (reason: "empty" or a transcribe.classify_error kind), shown in the menu."""
     meta = _jobs.pop(jobid, None)
     wav = meta["wav_path"] if meta else _wav_path(jobid)
+    created_ts = meta.get("created_ts", time.time()) if meta else time.time()
     try:
         os.makedirs(config.UNRESOLVED_DIR, exist_ok=True)
-        dest = os.path.join(config.UNRESOLVED_DIR, f"{jobid}.wav")
-        shutil.move(wav, dest)
+        shutil.move(wav, _unresolved_wav(jobid))
+        with open(_unresolved_sidecar(jobid), "w", encoding="utf-8") as f:
+            json.dump({"created_ts": created_ts, "reason": reason}, f)
     except OSError:
         pass
     try:
@@ -160,9 +173,15 @@ def _backoff_for(attempts: int) -> float:
 
 
 # --- Public API -----------------------------------------------------------
-def enqueue(wav_path: str) -> None:
+def enqueue(
+    wav_path: str, created_ts: float | None = None, manual: bool = False
+) -> None:
     """Register a new take: move the WAV into PENDING_DIR and wake the worker
-    (transcription due immediately)."""
+    (transcription due immediately).
+
+    manual=True: a take re-run from the menu. Its text goes to the clipboard
+    (deferred delivery, never pasted at the cursor), and it keeps its original
+    recording date (created_ts)."""
     if not wav_path or not os.path.exists(wav_path):
         return
     os.makedirs(config.PENDING_DIR, exist_ok=True)
@@ -180,10 +199,11 @@ def enqueue(wav_path: str) -> None:
     now = time.time()
     meta = {
         "wav_path": dest,
-        "created_ts": now,
+        "created_ts": created_ts or now,
         "attempts": 0,
         "next_try_ts": now,  # due immediately
-        "ever_deferred": False,
+        "ever_deferred": manual,
+        "manual": manual,
     }
     with _cond:
         _jobs[jobid] = meta
@@ -233,7 +253,7 @@ def recover_pending() -> int:
         if meta["attempts"] >= config.RETRY_MAX_ATTEMPTS:
             with _cond:
                 _jobs[jobid] = meta
-                _move_to_unresolved(jobid)
+                _move_to_unresolved(jobid, "network")
             _log(f"recovered job {jobid} already at attempt cap -> unresolved/")
             continue
         # Purge takes that are too old.
@@ -254,53 +274,121 @@ def recover_pending() -> int:
     return recovered
 
 
-def unresolved_count() -> int:
-    """Number of preserved (empty-transcription) takes awaiting a manual retry."""
+def _unresolved_ids() -> list[str]:
     d = config.UNRESOLVED_DIR
     if not os.path.isdir(d):
-        return 0
-    return sum(1 for n in os.listdir(d) if n.endswith(".wav"))
+        return []
+    return [n[:-4] for n in os.listdir(d) if n.endswith(".wav")]
+
+
+def _unresolved_info(jobid: str) -> dict:
+    """Date, duration and failure reason of a preserved take.
+
+    Takes kept by an older version have no sidecar: their file date is used and
+    the reason is "empty" (the only case those versions preserved)."""
+    wav = _unresolved_wav(jobid)
+    info = {"id": jobid, "created_ts": None, "reason": "empty"}
+    try:
+        with open(_unresolved_sidecar(jobid), encoding="utf-8") as f:
+            saved = json.load(f)
+        info["created_ts"] = saved.get("created_ts")
+        info["reason"] = saved.get("reason", "other")
+    except (OSError, ValueError):
+        pass
+    if info["created_ts"] is None:
+        try:
+            info["created_ts"] = os.path.getmtime(wav)
+        except OSError:
+            info["created_ts"] = 0.0
+    # 16-bit samples, minus the 44-byte WAV header.
+    bytes_per_s = config.SAMPLE_RATE * config.CHANNELS * 2
+    info["duration_s"] = max(0.0, (_wav_size(wav) - 44) / bytes_per_s)
+    return info
+
+
+def unresolved_count() -> int:
+    """Number of preserved (failed) takes awaiting a manual retry."""
+    return len(_unresolved_ids())
+
+
+def list_unresolved() -> list[dict]:
+    """Preserved takes, NEWEST first: [{id, created_ts, duration_s, reason}]."""
+    infos = [_unresolved_info(j) for j in _unresolved_ids()]
+    return sorted(infos, key=lambda i: i["created_ts"], reverse=True)
+
+
+_REASON_LABELS = {
+    "empty": "no text returned",
+    "network": "network",
+    "auth": "API key rejected",
+    "missing": "no API key",
+    "ssl": "SSL / proxy",
+}
+
+
+def unresolved_label(info: dict, now: float | None = None) -> str:
+    """Menu label of a preserved take: "Today 23:15 — 42 s — network"."""
+    import datetime
+
+    when = datetime.datetime.fromtimestamp(info["created_ts"])
+    today = datetime.datetime.fromtimestamp(now or time.time()).date()
+    if when.date() == today:
+        day = "Today"
+    elif when.date() == today - datetime.timedelta(days=1):
+        day = "Yesterday"
+    else:
+        day = f"{when.strftime('%b')} {when.day},"
+    secs = round(info["duration_s"])
+    length = f"{secs} s" if secs < 60 else f"{secs // 60} min {secs % 60:02d}"
+    reason = _REASON_LABELS.get(info["reason"], "error")
+    return f"{day} {when.strftime('%H:%M')} — {length} — {reason}"
+
+
+def _delete_unresolved(jobid: str) -> None:
+    for p in (_unresolved_wav(jobid), _unresolved_sidecar(jobid)):
+        try:
+            os.remove(p)
+        except OSError:
+            pass
 
 
 def purge_unresolved() -> int:
     """Delete preserved takes older than PENDING_MAX_AGE_SECONDS. Returns count."""
-    d = config.UNRESOLVED_DIR
-    if not os.path.isdir(d):
-        return 0
     now = time.time()
     purged = 0
-    for name in os.listdir(d):
-        if not name.endswith(".wav"):
-            continue
-        p = os.path.join(d, name)
-        try:
-            if now - os.path.getmtime(p) > config.PENDING_MAX_AGE_SECONDS:
-                os.remove(p)
-                purged += 1
-        except OSError:
-            pass
+    for info in list_unresolved():
+        if now - info["created_ts"] > config.PENDING_MAX_AGE_SECONDS:
+            _delete_unresolved(info["id"])
+            purged += 1
     return purged
 
 
-def retry_unresolved() -> int:
-    """Re-enqueue every preserved (empty) take for a fresh transcription attempt.
+def delete_all_unresolved() -> int:
+    """Delete every preserved take (menu "Delete all"). Returns count."""
+    ids = _unresolved_ids()
+    for jobid in ids:
+        _delete_unresolved(jobid)
+    return len(ids)
 
-    Called on demand (menu / CLI). Each WAV is moved back into the normal queue
-    via enqueue() (new jobid), so a manual retry can rescue a dictation whose
-    first transcription came back empty. Returns the number re-enqueued."""
-    d = config.UNRESOLVED_DIR
-    if not os.path.isdir(d):
-        return 0
-    n = 0
-    for name in os.listdir(d):
-        if not name.endswith(".wav"):
-            continue
-        src = os.path.join(d, name)
-        before = _wav_size(src)
-        enqueue(src)  # moves the WAV into PENDING_DIR under a fresh jobid
-        if before and not os.path.exists(src):
-            n += 1
-    return n
+
+def retry_unresolved_one(jobid: str) -> bool:
+    """Re-run ONE preserved take (menu click). Its text goes to the clipboard.
+
+    The WAV moves back into the normal queue (fresh attempts, same cap), keeping
+    its original recording date. Returns False if the take no longer exists."""
+    src = _unresolved_wav(jobid)
+    if not os.path.exists(src):
+        return False
+    created_ts = _unresolved_info(jobid)["created_ts"]
+    enqueue(src, created_ts=created_ts, manual=True)
+    if os.path.exists(src):
+        return False  # move failed: the take stays listed
+    try:
+        os.remove(_unresolved_sidecar(jobid))
+    except OSError:
+        pass
+    _log(f"unresolved {jobid} re-queued by the user")
+    return True
 
 
 def start() -> threading.Thread | None:
@@ -369,7 +457,7 @@ def _run() -> None:
                     m["attempts"] = m.get("attempts", 0) + 1
                     m["next_try_ts"] = time.time() + _backoff_for(m["attempts"])
                     if m["attempts"] >= config.RETRY_MAX_ATTEMPTS:
-                        _move_to_unresolved(jobid)
+                        _move_to_unresolved(jobid, "other")
             _notify_state()
 
 
@@ -384,12 +472,13 @@ def _attempt(jobid: str, wav: str) -> None:
     text = None
     ok = False
     err_msg = None
+    err_kind = "other"
     retriable = True
     try:
         text = _transcribe.transcribe(wav)
         ok = True
     except Exception as exc:  # noqa: BLE001
-        err_msg = _transcribe.classify_error(exc)[1]
+        err_kind, err_msg = _transcribe.classify_error(exc)
         retriable = _transcribe.is_retriable(exc)
         _log(
             f"job {jobid} attempt failed: {type(exc).__name__} "
@@ -400,6 +489,7 @@ def _attempt(jobid: str, wav: str) -> None:
     gave_up = False
     empty_retry = False
     empty_preserved = False
+    empty_dropped_manual = False
     with _cond:
         _active_jobid = None
         if ok:
@@ -414,6 +504,7 @@ def _attempt(jobid: str, wav: str) -> None:
                 m = _jobs.get(jobid)
                 trivial = _wav_size(wav) < config.EMPTY_MIN_WAV_BYTES
                 if m is None or trivial:
+                    empty_dropped_manual = bool(m and m.get("manual"))
                     _remove_job(jobid)
                 else:
                     m["empty_attempts"] = m.get("empty_attempts", 0) + 1
@@ -422,7 +513,7 @@ def _attempt(jobid: str, wav: str) -> None:
                         _write_sidecar(jobid, m)
                         empty_retry = True
                     else:
-                        _move_to_unresolved(jobid)
+                        _move_to_unresolved(jobid, "empty")
                         empty_preserved = True
         else:
             m = _jobs.get(jobid)
@@ -436,7 +527,7 @@ def _attempt(jobid: str, wav: str) -> None:
                 # re-run automatically. Otherwise reschedule with back-off.
                 if not retriable or m["attempts"] >= config.RETRY_MAX_ATTEMPTS:
                     gave_up = True
-                    _move_to_unresolved(jobid)
+                    _move_to_unresolved(jobid, err_kind)
                 else:
                     m["next_try_ts"] = time.time() + _backoff_for(m["attempts"])
                     _write_sidecar(jobid, m)
@@ -472,6 +563,15 @@ def _attempt(jobid: str, wav: str) -> None:
             if cb is not None:
                 try:
                     cb("Empty transcription — audio kept, retry from the 🎙 menu")
+                except Exception:  # noqa: BLE001
+                    pass
+        elif empty_dropped_manual:
+            # A take re-run from the menu that holds no speech: say so, rather than a
+            # silent nothing after the user's click.
+            cb = on_empty or on_permanent_error or on_error
+            if cb is not None:
+                try:
+                    cb("No speech found in this take — removed")
                 except Exception:  # noqa: BLE001
                     pass
         # trivial empty take: nothing to deliver (job already removed).

@@ -142,8 +142,9 @@ PASTE_MODIFIER_WAIT = 1.0  # seconds
 # the user, so a dictation is never silently lost.
 EMPTY_RETRY_ATTEMPTS = 1
 # Below this WAV size, an empty result is treated as a genuine (accidental) empty
-# take and dropped without noise. ~0.5 s of 16 kHz mono int16 = 16000 bytes.
-EMPTY_MIN_WAV_BYTES = 16000
+# take and dropped without noise: a brief press of the key, not a dictation.
+# ~2 s of 16 kHz mono int16 = 64000 bytes.
+EMPTY_MIN_WAV_BYTES = 64000
 
 # --- User storage (outside the project folder) ---------------------------
 # We keep runtime data next to the API key, in Application Support (the packaged
@@ -156,10 +157,13 @@ import credentials  # noqa: E402  (avoids a cycle: credentials does not import c
 HISTORY_PATH = os.path.join(credentials.APP_SUPPORT_DIR, "history.jsonl")
 # Retry queue: WAVs awaiting transcription (+ .json sidecars).
 PENDING_DIR = os.path.join(credentials.APP_SUPPORT_DIR, "pending")
-# Takes whose transcription came back EMPTY (after the bounded re-attempts): the
-# audio is PRESERVED here, OUT of the auto-retry queue (never re-run in a loop),
-# until the user retries it (retry_unresolved) or it is purged by age.
+# Takes whose transcription FAILED (given up, or came back EMPTY): the audio is
+# PRESERVED here with a small .json sidecar (date, reason), OUT of the auto-retry
+# queue (never re-run in a loop), until the user retries it from the menu or it
+# is purged by age.
 UNRESOLVED_DIR = os.path.join(credentials.APP_SUPPORT_DIR, "unresolved")
+# Max takes listed in the "Failed dictations" submenu (newest first).
+FAILED_MENU_MAX_ITEMS = 10
 # Custom vocabulary dictionary (one entry per line, '#' = comment). Passed as-is
 # to the API via context_bias: no extra request/credit.
 VOCAB_FILE = os.path.join(credentials.APP_SUPPORT_DIR, "vocabulary.txt")

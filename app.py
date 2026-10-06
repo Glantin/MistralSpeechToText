@@ -367,13 +367,15 @@ class AppDelegate(NSObject):
         menu.addItem_(
             self._mk_item("Recording limit…", b"setRecordLimit:")
         )
-        # Shown only when takes are preserved after a failed transcription (see
-        # _refresh_menu): re-runs them so a dictation is never lost.
-        self._retry_item = self._mk_item(
-            "Retry failed transcriptions", b"retryUnresolved:"
+        # Shown only when takes are preserved after a failed transcription. Its
+        # submenu (rebuilt in _refresh_menu) lists them newest first; a click
+        # re-runs THAT take only, so a dictation is never lost.
+        self._failed_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Failed dictations", None, ""
         )
-        self._retry_item.setHidden_(True)
-        menu.addItem_(self._retry_item)
+        self._failed_item.setSubmenu_(NSMenu.alloc().init())
+        self._failed_item.setHidden_(True)
+        menu.addItem_(self._failed_item)
         menu.addItem_(NSMenuItem.separatorItem())
         menu.addItem_(self._mk_item("Quit", b"quitApp:"))
 
@@ -408,14 +410,39 @@ class AppDelegate(NSObject):
         self._login_item.setState_(
             NSControlStateValueOn if login_enabled() else NSControlStateValueOff
         )
-        # Surface the retry item only when there is something to retry.
+        # Surface the failed-dictations submenu only when there is something.
         try:
-            u = core.transcribe_queue.unresolved_count()
+            takes = core.transcribe_queue.list_unresolved()
         except Exception:  # noqa: BLE001
-            u = 0
-        self._retry_item.setHidden_(u == 0)
-        if u:
-            self._retry_item.setTitle_(f"Retry failed transcriptions ({u})")
+            takes = []
+        self._failed_item.setHidden_(not takes)
+        if takes:
+            self._failed_item.setTitle_(f"Failed dictations ({len(takes)})")
+            self._fill_failed_menu(self._failed_item.submenu(), takes)
+
+    @objc.python_method
+    def _fill_failed_menu(self, sub: NSMenu, takes: list) -> None:
+        sub.removeAllItems()
+        hint = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Click one to retry it — the text goes to the clipboard", None, ""
+        )
+        hint.setEnabled_(False)
+        sub.addItem_(hint)
+        for info in takes[: config.FAILED_MENU_MAX_ITEMS]:
+            item = self._mk_item(
+                core.transcribe_queue.unresolved_label(info), b"retryUnresolvedOne:"
+            )
+            item.setRepresentedObject_(info["id"])
+            sub.addItem_(item)
+        hidden = len(takes) - config.FAILED_MENU_MAX_ITEMS
+        if hidden > 0:
+            more = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                f"… and {hidden} older", None, ""
+            )
+            more.setEnabled_(False)
+            sub.addItem_(more)
+        sub.addItem_(NSMenuItem.separatorItem())
+        sub.addItem_(self._mk_item("Delete all…", b"deleteUnresolved:"))
 
     # --- Main timer ---
     @objc.python_method
@@ -560,14 +587,28 @@ class AppDelegate(NSObject):
         stored = settings.set_max_record_minutes(minutes)
         _notify(f"Recording limit set to {stored} min (applies to the next take).")
 
-    def retryUnresolved_(self, sender):  # noqa: N802, ARG002
-        """Re-queue takes preserved after a failed/empty transcription (never lost)."""
-        n = core.retry_unresolved()
-        self._refresh_menu()
-        if n:
-            _notify(f"{n} take(s) re-queued for transcription.")
+    def retryUnresolvedOne_(self, sender):  # noqa: N802
+        """Re-run ONE failed take; its text will land on the clipboard."""
+        if core.transcribe_queue.retry_unresolved_one(str(sender.representedObject())):
+            _notify("Retrying this dictation — the text will go to the clipboard.")
         else:
-            _notify("No failed takes to retry.")
+            _notify("This dictation is no longer available.")
+        self._refresh_menu()
+
+    def deleteUnresolved_(self, sender):  # noqa: N802, ARG002
+        """Delete every failed take, after a confirmation."""
+        from AppKit import NSAlert, NSAlertFirstButtonReturn
+
+        n = core.transcribe_queue.unresolved_count()
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_(f"Delete {n} failed dictation(s)?")
+        alert.setInformativeText_("The audio will be deleted. This cannot be undone.")
+        alert.addButtonWithTitle_("Delete")
+        alert.addButtonWithTitle_("Cancel")
+        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+        if alert.runModal() == NSAlertFirstButtonReturn:
+            core.transcribe_queue.delete_all_unresolved()
+        self._refresh_menu()
 
     def toggleLogin_(self, sender):  # noqa: N802, ARG002
         ok, msg = set_login_enabled(not login_enabled())

@@ -62,23 +62,86 @@ def test_move_to_unresolved_preserves_wav(tmp_path, monkeypatch):
     assert transcribe_queue.unresolved_count() == 1
 
 
-def test_retry_unresolved_re_enqueues(tmp_path, monkeypatch):
+def test_retry_one_re_enqueues_only_that_take(tmp_path, monkeypatch):
+    import json
     import os
 
     _point_dirs(tmp_path, monkeypatch)
     monkeypatch.setattr(transcribe_queue, "_notify_state", lambda: None)
     transcribe_queue._jobs.clear()
     os.makedirs(config.UNRESOLVED_DIR, exist_ok=True)
-    kept = os.path.join(config.UNRESOLVED_DIR, "old.wav")
-    with open(kept, "wb") as f:
-        f.write(b"RIFFfake-audio")
+    for jid in ("a", "b"):
+        with open(os.path.join(config.UNRESOLVED_DIR, f"{jid}.wav"), "wb") as f:
+            f.write(b"RIFFfake-audio")
+    with open(os.path.join(config.UNRESOLVED_DIR, "a.json"), "w") as f:
+        json.dump({"created_ts": 1234.0, "reason": "network"}, f)
 
-    n = transcribe_queue.retry_unresolved()
+    assert transcribe_queue.retry_unresolved_one("a") is True
 
-    assert n == 1
-    assert not os.path.exists(kept)  # moved back out of unresolved/
-    assert len(transcribe_queue._jobs) == 1  # a fresh job now awaits transcription
+    assert transcribe_queue.unresolved_count() == 1  # "b" untouched
+    assert not os.path.exists(os.path.join(config.UNRESOLVED_DIR, "a.json"))
+    (meta,) = transcribe_queue._jobs.values()
+    assert meta["created_ts"] == 1234.0  # original recording date kept
+    assert meta["ever_deferred"] is True  # text -> clipboard, never pasted
+    assert transcribe_queue.retry_unresolved_one("gone") is False
     transcribe_queue._jobs.clear()
+
+
+def test_list_unresolved_newest_first_with_reason(tmp_path, monkeypatch):
+    import json
+    import os
+
+    _point_dirs(tmp_path, monkeypatch)
+    os.makedirs(config.UNRESOLVED_DIR, exist_ok=True)
+    bps = config.SAMPLE_RATE * config.CHANNELS * 2
+    for jid, ts, reason, secs in (("old", 100.0, "auth", 3), ("new", 200.0, "network", 42)):
+        with open(os.path.join(config.UNRESOLVED_DIR, f"{jid}.wav"), "wb") as f:
+            f.write(b"\0" * (44 + bps * secs))
+        with open(os.path.join(config.UNRESOLVED_DIR, f"{jid}.json"), "w") as f:
+            json.dump({"created_ts": ts, "reason": reason}, f)
+    # A take kept by an older version: no sidecar -> file date, reason "empty".
+    with open(os.path.join(config.UNRESOLVED_DIR, "legacy.wav"), "wb") as f:
+        f.write(b"\0" * 44)
+    os.utime(os.path.join(config.UNRESOLVED_DIR, "legacy.wav"), (50, 50))
+
+    takes = transcribe_queue.list_unresolved()
+
+    assert [t["id"] for t in takes] == ["new", "old", "legacy"]
+    assert takes[0]["reason"] == "network" and round(takes[0]["duration_s"]) == 42
+    assert takes[2]["reason"] == "empty"
+
+
+def test_unresolved_label():
+    import datetime
+
+    now = datetime.datetime(2026, 10, 5, 22, 0).timestamp()
+    today = datetime.datetime(2026, 10, 5, 21, 15).timestamp()
+    yday = datetime.datetime(2026, 10, 4, 18, 2).timestamp()
+    older = datetime.datetime(2026, 10, 2, 9, 5).timestamp()
+    label = transcribe_queue.unresolved_label
+
+    assert label({"created_ts": today, "duration_s": 42.2, "reason": "network"}, now) == (
+        "Today 21:15 — 42 s — network"
+    )
+    assert label({"created_ts": yday, "duration_s": 70, "reason": "auth"}, now) == (
+        "Yesterday 18:02 — 1 min 10 — API key rejected"
+    )
+    assert label({"created_ts": older, "duration_s": 1, "reason": "weird"}, now) == (
+        "Oct 2, 09:05 — 1 s — error"
+    )
+
+
+def test_delete_all_unresolved(tmp_path, monkeypatch):
+    import os
+
+    _point_dirs(tmp_path, monkeypatch)
+    os.makedirs(config.UNRESOLVED_DIR, exist_ok=True)
+    for name in ("a.wav", "a.json", "b.wav"):
+        with open(os.path.join(config.UNRESOLVED_DIR, name), "wb") as f:
+            f.write(b"x")
+
+    assert transcribe_queue.delete_all_unresolved() == 2
+    assert os.listdir(config.UNRESOLVED_DIR) == []
 
 
 def test_purge_unresolved_drops_old(tmp_path, monkeypatch):
@@ -159,6 +222,8 @@ def test_permanent_error_gives_up_at_once_and_keeps_audio(tmp_path, monkeypatch)
 
     assert transcribe_queue._jobs == {}
     assert (tmp_path / "unresolved" / "job-401.wav").exists()
+    (take,) = transcribe_queue.list_unresolved()
+    assert take["reason"] == "auth"  # 401 -> shown as "API key rejected"
 
 
 def test_recover_pending_does_not_resume_capped_job(tmp_path, monkeypatch):
@@ -177,3 +242,20 @@ def test_recover_pending_does_not_resume_capped_job(tmp_path, monkeypatch):
     assert transcribe_queue._jobs == {}
     assert (unresolved / "job-old.wav").exists()
     assert not (pending / "job-old.json").exists()
+
+
+def test_manual_retry_of_silent_take_is_reported(tmp_path, monkeypatch):
+    _point_dirs(tmp_path, monkeypatch)
+    monkeypatch.setattr(transcribe_queue, "_notify_state", lambda: None)
+    seen = []
+    monkeypatch.setattr(transcribe_queue, "on_empty", seen.append)
+    monkeypatch.setattr(transcribe_queue._transcribe, "transcribe", lambda p: "")
+    transcribe_queue._jobs.clear()
+    wav = _register_job("job-silent")  # ~20 kB: below the 2 s threshold
+    transcribe_queue._jobs["job-silent"]["manual"] = True
+
+    transcribe_queue._attempt("job-silent", wav)
+
+    assert transcribe_queue._jobs == {}
+    assert transcribe_queue.unresolved_count() == 0
+    assert seen == ["No speech found in this take — removed"]
